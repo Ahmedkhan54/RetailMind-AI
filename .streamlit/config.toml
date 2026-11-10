@@ -1,0 +1,31 @@
+# RetailMind AI — Streamlit theme
+[theme]
+base = "dark"
+primaryColor = "#7c5cff"
+backgroundColor = "#0b1020"
+secondaryBackgroundColor = "#141b31"
+textColor = "#e7ecff"
+font = "sans serif"
+baseRadius = "0.75rem"
+buttonRadius = "0.65rem"
+showWidgetBorder = true
+showSidebarBorder = true
+metricValueFontSize = "1.55rem"
+metricValueFontWeight = 700
+chartCategoricalColors = ["#7c5cff", "#22c55e", "#38bdf8", "#f59e0b", "#f472b6", "#a3e635"]
+chartSequentialColors = ["#151b31", "#24305c", "#3e4ca0", "#6653d6", "#9b7bff", "#d3c3ff", "#f1edff", "#ffffff", "#ffffff", "#ffffff"]
+paddingTop = "1.5rem"
+paddingBottom = "2rem"
+
+[theme.sidebar]
+backgroundColor = "#10172b"
+secondaryBackgroundColor = "#18213a"
+textColor = "#e7ecff"
+primaryColor = "#9b7bff"
+paddingTop = "1rem"
+
+[browser]
+gatherUsageStats = false
+
+[server]
+maxUploadSize = 25

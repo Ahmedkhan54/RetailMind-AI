@@ -1,0 +1,38 @@
+
+# Python environments
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Secrets
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Temporary folders
+scratch/
+tmp_apptest/
+tmp_py311_diag/
+tmp*
+diag_streamlit.err
+diag_streamlit.out
+
+# Editor and local tools
+.cursor/
+
+# Node
+node_modules/
+.next/
+dist/
+
+# Local archives
+*.zip
+
+# OS
+.DS_Store
+Thumbs.db

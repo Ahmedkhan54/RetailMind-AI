@@ -1,0 +1,31 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_DATABASE: retail_sales_db
+          MYSQL_ROOT_PASSWORD: retail_test_password
+        ports: [3306:3306]
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -proot --silent"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+    env:
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_PORT: 3306
+      MYSQL_USER: root
+      MYSQL_PASSWORD: retail_test_password
+      MYSQL_DATABASE: retail_sales_db
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install -r requirements.txt
+      - run: playwright install --with-deps chromium
+      - run: mysql -h 127.0.0.1 -uroot -pretail_test_password < sql/01_create_database_and_table.sql
+      - run: ruff check .
+      - run: pytest -q
+      - run: pytest -q -m e2e
