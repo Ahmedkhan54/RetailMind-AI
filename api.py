@@ -289,7 +289,7 @@ async def upload_dataset(
     if suffix not in SUPPORTED_EXTENSIONS:
         raise HTTPException(status_code=415, detail="Upload a CSV or Excel file (.csv, .xlsx, .xls, .xlsm).")
 
-    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    content = file.file.read(MAX_UPLOAD_BYTES + 1)
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="The existing upload limit is 25 MB.")
     if not content:
@@ -491,7 +491,7 @@ async def add_rag_document(
         raise HTTPException(status_code=400, detail="Choose a document with a simple filename.")
     if suffix not in {".txt", ".md", ".csv", ".json", ".pdf", ".docx"}:
         raise HTTPException(status_code=415, detail="Upload TXT, MD, CSV, JSON, PDF, or DOCX documents.")
-    content = await file.read(5 * 1024 * 1024 + 1)
+    content = file.file.read(5 * 1024 * 1024 + 1)
     if len(content) > 5 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="RAG documents must be 5 MB or smaller.")
     store = get_rag_store(user.id)

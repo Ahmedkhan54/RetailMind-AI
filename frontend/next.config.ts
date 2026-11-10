@@ -19,8 +19,12 @@ const nextConfig: NextConfig = {
       },
     ];
   },
-  cacheComponents: true,
-  partialPrefetching: true,
+  // cacheComponents and partialPrefetching are disabled for stable builds on Windows
+  // cacheComponents: true,
+  // partialPrefetching: true,
+  experimental: {
+    cpus: 1,
+  },
   turbopack: {
     rules: {
       "*.css": {
