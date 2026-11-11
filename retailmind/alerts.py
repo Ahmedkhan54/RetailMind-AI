@@ -24,7 +24,7 @@ from retailmind.schema import DatasetSchema
 
 SEVERITIES = ("critical", "warning", "info")
 SEVERITY_ORDER = {"critical": 0, "warning": 1, "info": 2}
-STATUSES = ("new", "acknowledged", "dismissed")
+STATUSES = ("new", "acknowledged", "dismissed", "resolved")
 
 
 def _now() -> str:
@@ -619,6 +619,7 @@ class NotificationPreferences:
     smtp_password: str | None = None
     sender: str | None = None
     use_tls: bool = True
+    frequency: str = "instant"
 
     @classmethod
     def from_env(cls) -> "NotificationPreferences":
@@ -636,10 +637,17 @@ class NotificationPreferences:
             smtp_user=os.environ.get("RETAILMIND_SMTP_USER"),
             smtp_password=os.environ.get("RETAILMIND_SMTP_PASSWORD"),
             sender=os.environ.get("RETAILMIND_SMTP_FROM") or os.environ.get("RETAILMIND_SMTP_USER"),
+            frequency=(os.environ.get("RETAILMIND_ALERT_FREQUENCY", "instant").strip().lower()
+                       if os.environ.get("RETAILMIND_ALERT_FREQUENCY", "instant").strip().lower() in {"instant", "daily"}
+                       else "instant"),
         )
 
     def configured(self) -> bool:
         return bool(self.email_enabled and self.recipients and self.smtp_host and self.sender)
+
+    def smtp_ready(self) -> bool:
+        """SMTP transport and a sender exist, even if alert email is switched off."""
+        return bool(self.recipients and self.smtp_host and self.sender)
 
 
 @dataclass
@@ -682,6 +690,171 @@ def build_notifications(
             )
         result.append(notification)
     return result
+
+
+def alert_email_html(alert: Alert, dashboard_link: str) -> str:
+    """Professional HTML email for one generated alert (escaped values)."""
+    from html import escape
+
+    def row(label: str, value: object) -> str:
+        return (
+            '<tr><td style="padding:8px 14px;color:#64748b;font-size:13px;border-bottom:1px solid #eef2f7;">'
+            f"{escape(label)}</td><td style=\"padding:8px 14px;color:#1e293b;font-size:13px;"
+            f'font-weight:600;border-bottom:1px solid #eef2f7;">{escape(str(value))}</td></tr>'
+        )
+
+    change = "—" if alert.pct_change is None else f"{alert.pct_change:+.1%}"
+    severity_color = {"critical": "#b42318", "warning": "#b54708", "info": "#175cd3"}.get(alert.severity, "#475467")
+    rows = "".join(
+        row(label, value)
+        for label, value in (
+            ("Severity", alert.severity.title()),
+            ("Affected scope", alert.scope.replace(":", ": ")),
+            ("Current value", f"{alert.current_value:,.2f}" if alert.current_value is not None else "—"),
+            ("Previous value", f"{alert.previous_value:,.2f}" if alert.previous_value is not None else "—"),
+            ("Change", change),
+            ("Comparison period", alert.comparison_period or "Not available"),
+            ("Detected", alert.detected_at),
+        )
+    )
+    return f"""<!doctype html>
+<html><body style="margin:0;background:#f5f7fb;font-family:Inter,Segoe UI,Arial,sans-serif;">
+<div style="max-width:600px;margin:24px auto;background:#ffffff;border:1px solid #e4e9f2;border-radius:12px;overflow:hidden;">
+  <div style="background:#13294b;padding:20px 24px;color:#ffffff;">
+    <div style="font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#a9c1e4;">RetailMind AI · Smart Alert</div>
+    <h1 style="margin:6px 0 0;font-size:20px;line-height:1.35;">{escape(alert.title)}</h1>
+  </div>
+  <div style="padding:20px 24px;">
+    <p style="margin:0 0 14px;color:#334155;font-size:14px;line-height:1.6;">{escape(alert.description)}</p>
+    <table style="width:100%;border-collapse:collapse;border:1px solid #eef2f7;border-radius:8px;">{rows}</table>
+    <p style="margin:16px 0 6px;color:#0f172a;font-size:13px;font-weight:700;">Recommended action</p>
+    <p style="margin:0 0 18px;color:#475569;font-size:13px;line-height:1.6;">{escape(alert.suggestion)}</p>
+    <a href="{escape(dashboard_link)}" style="display:inline-block;background:{severity_color};color:#ffffff;text-decoration:none;font-size:13px;font-weight:600;padding:10px 16px;border-radius:8px;">Open Smart Alerts</a>
+  </div>
+  <div style="padding:14px 24px;background:#f8fafc;color:#94a3b8;font-size:11px;">
+    This alert was generated from your active dataset. Statistical observations are not proof of cause.
+  </div>
+</div></body></html>"""
+
+
+def send_alert_email(alert: Alert, preferences: NotificationPreferences, dashboard_link: str) -> str:
+    """Send one alert email and report only what the SMTP server confirmed."""
+    if not preferences.email_enabled:
+        return "disabled"
+    if not preferences.configured():
+        return "not_configured"
+    message = EmailMessage()
+    message["Subject"] = f"[RetailMind AI] {alert.severity.upper()}: {alert.title}"
+    message["From"] = preferences.sender or ""
+    message["To"] = ", ".join(preferences.recipients)
+    message.set_content(alert.description)
+    message.add_alternative(alert_email_html(alert, dashboard_link), subtype="html")
+    try:
+        with smtplib.SMTP(preferences.smtp_host or "", preferences.smtp_port, timeout=15) as client:
+            if preferences.use_tls:
+                client.starttls()
+            if preferences.smtp_user and preferences.smtp_password:
+                client.login(preferences.smtp_user, preferences.smtp_password)
+            client.send_message(message)
+        return "accepted_by_smtp"
+    except Exception as error:  # never claim delivery on failure
+        return f"failed: {type(error).__name__}"
+
+
+def alert_digest_html(alerts: list[Alert], dashboard_link: str) -> str:
+    """One HTML digest for several alerts (escaped values)."""
+    from html import escape
+
+    rows_parts: list[str] = []
+    for alert in alerts:
+        change = "—" if alert.pct_change is None else f"{alert.pct_change:+.1%}"
+        rows_parts.append(
+            '<tr><td style="padding:10px 12px;border-bottom:1px solid #eef2f7;">'
+            f'<div style="font-size:13px;font-weight:650;color:#1e293b;">{escape(alert.title)}</div>'
+            f'<div style="margin-top:3px;font-size:12px;color:#64748b;">{escape(alert.scope.replace(":", ": "))}'
+            f' · {escape(alert.severity.title())}</div></td>'
+            '<td style="padding:10px 12px;border-bottom:1px solid #eef2f7;text-align:right;'
+            'font-size:12px;color:#475467;white-space:nowrap;">'
+            f'{change}</td></tr>'
+        )
+    rows = "".join(rows_parts)
+    return f"""<!doctype html>
+<html><body style="margin:0;background:#f5f7fb;font-family:Inter,Segoe UI,Arial,sans-serif;">
+<div style="max-width:620px;margin:24px auto;background:#ffffff;border:1px solid #e4e9f2;border-radius:12px;overflow:hidden;">
+  <div style="background:#13294b;padding:20px 24px;color:#ffffff;">
+    <div style="font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:#a9c1e4;">RetailMind AI · Daily alert digest</div>
+    <h1 style="margin:6px 0 0;font-size:20px;line-height:1.35;">{len(alerts)} business alert(s) need attention</h1>
+  </div>
+  <div style="padding:18px 24px;">
+    <table style="width:100%;border-collapse:collapse;border:1px solid #eef2f7;border-radius:8px;">{rows}</table>
+    <a href="{escape(dashboard_link)}" style="display:inline-block;margin-top:18px;background:#b42318;color:#ffffff;text-decoration:none;font-size:13px;font-weight:600;padding:10px 16px;border-radius:8px;">Open Smart Alerts</a>
+  </div>
+  <div style="padding:14px 24px;background:#f8fafc;color:#94a3b8;font-size:11px;">
+    This digest was generated from your active dataset. Statistical observations are not proof of cause.
+  </div>
+</div></body></html>"""
+
+
+def send_alert_digest(alerts: list[Alert], preferences: NotificationPreferences, dashboard_link: str) -> str:
+    """Send one digest email; report only SMTP acceptance."""
+    if not preferences.email_enabled:
+        return "disabled"
+    if not preferences.configured():
+        return "not_configured"
+    message = EmailMessage()
+    message["Subject"] = f"[RetailMind AI] {len(alerts)} alert(s) need attention"
+    message["From"] = preferences.sender or ""
+    message["To"] = ", ".join(preferences.recipients)
+    message.set_content("\n\n".join(f"{alert.severity.upper()}: {alert.title}\n{alert.description}" for alert in alerts))
+    message.add_alternative(alert_digest_html(alerts, dashboard_link), subtype="html")
+    try:
+        with smtplib.SMTP(preferences.smtp_host or "", preferences.smtp_port, timeout=15) as client:
+            if preferences.use_tls:
+                client.starttls()
+            if preferences.smtp_user and preferences.smtp_password:
+                client.login(preferences.smtp_user, preferences.smtp_password)
+            client.send_message(message)
+        return "accepted_by_smtp"
+    except Exception as error:
+        return f"failed: {type(error).__name__}"
+
+
+def send_test_email(preferences: NotificationPreferences, recipient: str | None = None) -> str:
+    """Send a labelled test message; never reports acceptance without SMTP."""
+    if not preferences.smtp_host or not preferences.sender:
+        return "not_configured"
+    target = (recipient or (preferences.recipients[0] if preferences.recipients else "")).strip()
+    if not target:
+        return "no_recipient"
+    message = EmailMessage()
+    message["Subject"] = "[RetailMind AI] SMTP test email"
+    message["From"] = preferences.sender
+    message["To"] = target
+    message.set_content(
+        "This is a RetailMind AI test email. Your SMTP settings can deliver alert "
+        "notifications. No business alert is attached to this message."
+    )
+    message.add_alternative(
+        '<div style="font-family:Inter,Segoe UI,Arial,sans-serif;max-width:560px;margin:24px auto;'
+        'border:1px solid #e4e9f2;border-radius:12px;overflow:hidden;">'
+        '<div style="background:#13294b;color:#fff;padding:18px 22px;font-size:18px;">'
+        'RetailMind AI · SMTP test</div>'
+        '<div style="padding:20px 22px;color:#334155;font-size:14px;line-height:1.6;">'
+        "<p>Your SMTP settings can deliver RetailMind AI alert emails.</p>"
+        '<p style="color:#64748b;font-size:12px;">This message was requested from Smart Alerts. '
+        "It contains no business alert and does not confirm inbox delivery.</p></div></div>",
+        subtype="html",
+    )
+    try:
+        with smtplib.SMTP(preferences.smtp_host, preferences.smtp_port, timeout=15) as client:
+            if preferences.use_tls:
+                client.starttls()
+            if preferences.smtp_user and preferences.smtp_password:
+                client.login(preferences.smtp_user, preferences.smtp_password)
+            client.send_message(message)
+        return "accepted_by_smtp"
+    except Exception as error:  # report the failure class only, never credentials
+        return f"failed: {type(error).__name__}"
 
 
 def send_email_notification(notification: Notification, preferences: NotificationPreferences) -> str:

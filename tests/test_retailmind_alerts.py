@@ -17,7 +17,10 @@ from retailmind.alerts import (
     detect_alerts,
     dismiss,
     filter_alerts,
+    alert_digest_html,
     merge_alerts,
+    send_alert_digest,
+    send_test_email,
     send_email_notification,
 )
 from retailmind.schema import infer_schema
@@ -155,6 +158,51 @@ def test_notification_preferences_and_building():
     assert len(notifications) == 1
     assert notifications[0].title == "Critical issue"
     assert notifications[0].severity == "critical"
+
+
+def test_alert_digest_escapes_values_and_lists_alerts():
+    alert = Alert(title="Revenue <dropped>", description="Body", metric="sales", severity="critical", scope="product_name:Chair & Desk", pct_change=-0.5)
+    html = alert_digest_html([alert], "https://example.com/smart-alerts")
+    assert "Revenue &lt;dropped&gt;" in html
+    assert "Chair &amp; Desk" in html
+    assert "-50.0%" in html
+
+
+def test_send_alert_digest_respects_disabled_preferences():
+    prefs = NotificationPreferences(email_enabled=False)
+    assert send_alert_digest([], prefs, "https://example.com") == "disabled"
+
+
+def test_notification_preferences_smtp_ready_is_independent_of_enabled():
+    prefs = NotificationPreferences(
+        email_enabled=False,
+        recipients=("alerts@example.com",),
+        smtp_host="smtp.example.com",
+        sender="noreply@example.com",
+    )
+    assert prefs.configured() is False
+    assert prefs.smtp_ready() is True
+
+
+@patch("smtplib.SMTP")
+def test_send_test_email_reports_smtp_acceptance(mock_smtp):
+    mock_instance = MagicMock()
+    mock_smtp.return_value.__enter__.return_value = mock_instance
+    prefs = NotificationPreferences(
+        email_enabled=False,
+        recipients=(),
+        smtp_host="smtp.example.com",
+        sender="noreply@example.com",
+    )
+    assert send_test_email(prefs, "owner@example.com") == "accepted_by_smtp"
+    sent = mock_instance.send_message.call_args.args[0]
+    assert sent["To"] == "owner@example.com"
+    assert "SMTP test" in sent["Subject"]
+
+
+def test_send_test_email_requires_transport():
+    prefs = NotificationPreferences(email_enabled=True, smtp_host=None, sender=None)
+    assert send_test_email(prefs, "owner@example.com") == "not_configured"
 
 
 def test_send_email_notification_when_disabled():

@@ -112,6 +112,7 @@ def build_inventory_recommendations(
     history_window: int = 28,
     target_cover_days: float = 14.0,
     method: str = "Exponential smoothing",
+    overstock_days: float = 90.0,
 ) -> InventoryResult:
     columns = detect_inventory_columns(frame, schema)
     missing = [name for name in ("product", "date", "quantity") if not columns.get(name)]
@@ -202,6 +203,8 @@ def build_inventory_recommendations(
             status = "Critical — reorder now"
         elif stock <= reorder_point:
             status = "Low — reorder soon"
+        elif forecast_daily > 0 and stock > forecast_daily * overstock_days:
+            status = "Overstock — review cover"
         else:
             status = "Healthy"
         rows.append(
@@ -232,7 +235,8 @@ def build_inventory_recommendations(
         "Critical — reorder now": 1,
         "Low — reorder soon": 2,
         "Stock data required": 3,
-        "Healthy": 4,
+        "Overstock — review cover": 4,
+        "Healthy": 5,
     }
     table["_order"] = table["status"].map(order).fillna(5)
     table = table.sort_values(["_order", "days_remaining"], na_position="last").drop(columns="_order").reset_index(drop=True)
@@ -249,6 +253,7 @@ def build_inventory_recommendations(
         f"Safety stock uses z={z:.4f} for a {service_level:.0%} service level when demand variability exists; "
         f"otherwise it falls back to {safety_days:g} days of forecast demand.",
         f"Suggested quantity targets the reorder point plus {target_cover_days:g} days of cover, minus current stock and incoming orders.",
+        f"Overstock is flagged when current stock covers more than {overstock_days:g} days of forecast demand.",
         "Missing calendar days are treated as zero demand; no stock level is ever invented.",
     ]
     return InventoryResult(

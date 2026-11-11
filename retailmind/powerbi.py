@@ -576,10 +576,14 @@ def build_pbip(
     )
     relationship_tmdl = []
     for index, (from_table, from_column, to_table, to_column) in enumerate(relationships, start=1):
+        rel_raw = uuid.uuid5(uuid.NAMESPACE_URL, f'{project}:{index}').hex
+        rel_guid = f"{rel_raw[:8]}-{rel_raw[8:12]}-{rel_raw[12:16]}-{rel_raw[16:20]}-{rel_raw[20:32]}"
+        from_ref = f"{_quote_tmdl(from_table)}.{_quote_tmdl(from_column)}"
+        to_ref = f"{_quote_tmdl(to_table)}.{_quote_tmdl(to_column)}"
         relationship_tmdl.append(
-            f"relationship {uuid.uuid5(uuid.NAMESPACE_URL, f'{project}:{index}').hex[:20]}\n"
-            f"\tfromColumn: {from_table}[{_quote_tmdl(from_column)}]\n"
-            f"\ttoColumn: {to_table}[{_quote_tmdl(to_column)}]\n"
+            f"relationship {rel_guid}\n"
+            f"\tfromColumn: {from_ref}\n"
+            f"\ttoColumn: {to_ref}\n"
         )
     files[f"{model_folder}/definition/relationships.tmdl"] = "\n".join(relationship_tmdl) + ("\n" if relationship_tmdl else "")
     files[f"{model_folder}/definition.pbism"] = json.dumps(
@@ -1032,13 +1036,23 @@ def validate_pbip(project: PBIPProject | dict[str, str]) -> list[str]:
     if relationships_path in files:
         for line in files[relationships_path].splitlines():
             for key in ("fromColumn", "toColumn"):
-                match = re.match(rf"^\t{key}:\s*([A-Za-z_][A-Za-z0-9_]*)\[(.+)\]$", line)
-                if match:
-                    table, column = match.group(1), match.group(2).strip("'")
+                if line.strip().startswith(f"{key}:"):
+                    target = line.split(":", 1)[1].strip()
+                    if "." in target:
+                        parts = target.split(".", 1)
+                        table, column = parts[0].strip().strip("'"), parts[1].strip().strip("'")
+                    elif "[" in target and target.endswith("]"):
+                        m2 = re.match(r"^([^\[]+)\[(.+)\]$", target)
+                        if m2:
+                            table, column = m2.group(1).strip().strip("'"), m2.group(2).strip().strip("'")
+                        else:
+                            continue
+                    else:
+                        continue
                     if table not in table_names:
                         errors.append(f"Relationship references unknown table '{table}'.")
                     elif column not in table_columns.get(table, set()):
-                        errors.append(f"Relationship references unknown column '{table}[{column}]'.")
+                        errors.append(f"Relationship references unknown column '{table}.{column}'.")
 
     # ---- TMDL structural validation --------------------------------------
     # Validate every generated TMDL file for valid table declarations,

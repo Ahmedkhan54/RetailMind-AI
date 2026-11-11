@@ -31,7 +31,7 @@ def multi_customer_df() -> pd.DataFrame:
     # Cust 5: Moderate
     for i in range(3):
         data.append({"cust_id": "C5", "order_date": f"2025-02-{i+1:02d}", "sales": 150.0, "order_id": f"O5_{i}"})
-        
+
     return pd.DataFrame(data)
 
 
@@ -42,7 +42,7 @@ def test_kmeans_numpy_deterministic():
     ])
     labels1, centers1, inertia1 = kmeans_numpy(matrix, k=2, seed=42)
     labels2, centers2, inertia2 = kmeans_numpy(matrix, k=2, seed=42)
-    
+
     assert np.array_equal(labels1, labels2)
     assert np.allclose(centers1, centers2)
     assert inertia1 == inertia2
@@ -104,12 +104,40 @@ def test_segment_customers_full_run(multi_customer_df: pd.DataFrame):
     assert "segment" in res.rfm.columns
     assert "recency_days" in res.rfm.columns
     assert "churn_risk_rule" in res.rfm.columns
-    
+
     # Check export bytes
     csv_bytes = res.to_csv_bytes()
     assert isinstance(csv_bytes, bytes)
     assert b"customer_id" in csv_bytes
-    
+
     excel_bytes = res.to_excel_bytes()
     assert isinstance(excel_bytes, bytes)
     assert len(excel_bytes) > 0
+
+
+def test_segment_customers_exact_cluster_count(multi_customer_df: pd.DataFrame):
+    schema = infer_schema(multi_customer_df)
+    res = segment_customers(multi_customer_df, schema, clusters=3)
+    assert res.available
+    assert res.k == 3
+    assert res.rfm["cluster"].nunique() <= 3
+    assert res.summary["customers"].sum() == len(res.rfm)
+    # Every customer carries the exact requested segment count in the summary.
+    assert len(res.summary) <= 3
+
+
+def test_segment_customers_two_clusters_override(multi_customer_df: pd.DataFrame):
+    schema = infer_schema(multi_customer_df)
+    res = segment_customers(multi_customer_df, schema, clusters=2)
+    assert res.available
+    assert res.k == 2
+    assert res.rfm["cluster"].nunique() == 2
+
+
+def test_segment_customers_clamp_to_customer_count(multi_customer_df: pd.DataFrame):
+    schema = infer_schema(multi_customer_df)
+    # 5 customers means the largest usable k is len(rfm) - 1 == 4.
+    res = segment_customers(multi_customer_df, schema, clusters=8)
+    assert res.available
+    assert res.k == 4
+    assert res.rfm["cluster"].nunique() <= 4

@@ -1,16 +1,21 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState, useSyncExternalStore, type ReactNode } from "react";
 import Link from "next/link";
 import useSWR from "swr";
 import { AnalyticsDateFilter } from "@/components/analytics-date-filter";
-import { useReducedMotion } from "@/lib/use-reduced-motion";
+import { RevenueDonut, ProfitGauge, KpiSparkline } from "@/components/dashboard-charts";
+import { CustomizeDashboard, DashboardModeBar, type DashboardMode } from "@/components/dashboard-customizer";
+import { AnimatedNumber } from "@/components/ui/animated-number";
+import { useChartAnimation } from "@/lib/animation-preference";
+import { formatCurrency, formatDate, formatNumber, formatPercent } from "@/lib/format";
 import {
   Area,
   AreaChart,
   Bar,
   BarChart,
   CartesianGrid,
+  Cell,
   ResponsiveContainer,
   Tooltip,
   XAxis,
@@ -47,22 +52,6 @@ async function fetchOverview(url: string): Promise<Overview> {
   return payload as Overview;
 }
 
-function formatCurrency(value: number | null | undefined) {
-  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
-  return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(value);
-}
-
-function formatNumber(value: number | null | undefined) {
-  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
-  return new Intl.NumberFormat("en-IN", { maximumFractionDigits: 1 }).format(value);
-}
-
-function metricValue(key: string, value: number | null | undefined) {
-  if (key === "total_sales" || key === "total_profit") return formatCurrency(value);
-  if (key === "profit_margin") return value == null ? "—" : `${(value * 100).toFixed(1)}%`;
-  return formatNumber(value);
-}
-
 const metricCards = [
   { label: "Total sales", key: "total_sales", icon: BarChart3 },
   { label: "Total profit", key: "total_profit", icon: CircleDollarSign },
@@ -71,6 +60,16 @@ const metricCards = [
   { label: "Total customers", key: "total_customers", icon: Users },
   { label: "Total products", key: "total_products", icon: Boxes },
 ];
+
+function MetricValue({ metricKey, value }: { metricKey: string; value: number | null | undefined }) {
+  if (metricKey === "total_sales" || metricKey === "total_profit") {
+    return <AnimatedNumber value={value ?? null} format={(current) => formatCurrency(current)} />;
+  }
+  if (metricKey === "profit_margin") {
+    return <AnimatedNumber value={typeof value === "number" ? value * 100 : null} format={(current) => formatPercent(current)} />;
+  }
+  return <AnimatedNumber value={value ?? null} format={(current) => formatNumber(current)} />;
+}
 
 function ConnectedChart({
   title,
@@ -81,7 +80,8 @@ function ConnectedChart({
   data: Record<string, unknown>[];
   kind: "trend" | "bar";
 }) {
-  const reducedMotion = useReducedMotion();
+  const { isAnimationActive, animationDuration, animationEasing } = useChartAnimation();
+  const stripeId = `bar-stripe-${useId().replace(/:/g, "")}`;
   return (
     <Card className="panel-card">
       <CardHeader className="panel-header"><div><CardTitle className="panel-title">{title}</CardTitle><p className="panel-subtitle">Calculated from the active dataset</p></div><Badge variant="outline">Live data</Badge></CardHeader>
@@ -90,22 +90,32 @@ function ConnectedChart({
           <div className="connected-chart">
             <ResponsiveContainer width="100%" height="100%">
               {kind === "trend" ? (
-                <AreaChart data={data} margin={{ top: 12, right: 4, left: 0, bottom: 0 }}>
-                  <defs><linearGradient id="salesFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#3e75bd" stopOpacity={0.2} /><stop offset="95%" stopColor="#3e75bd" stopOpacity={0} /></linearGradient></defs>
+                <AreaChart key={isAnimationActive ? "animated" : "static"} data={data} margin={{ top: 12, right: 4, left: 0, bottom: 0 }}>
+                  <defs><linearGradient id="salesFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#3e75bd" stopOpacity={0.24} /><stop offset="95%" stopColor="#3e75bd" stopOpacity={0} /></linearGradient></defs>
                   <CartesianGrid stroke="#edf0f5" strokeDasharray="3 4" vertical={false} />
                   <XAxis dataKey="date" tickFormatter={(value: string) => new Date(value).toLocaleDateString("en", { month: "short" })} tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 9 }} />
                   <YAxis tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 9 }} tickFormatter={(value: number) => new Intl.NumberFormat("en", { notation: "compact" }).format(value)} />
                   <Tooltip formatter={(value) => formatCurrency(Number(value))} labelFormatter={(value) => new Date(String(value)).toLocaleDateString("en", { month: "long", year: "numeric" })} />
-                  <Area type="monotone" dataKey="sales" name="Sales" stroke="#2f65a7" strokeWidth={2} fill="url(#salesFill)" isAnimationActive={!reducedMotion} />
-                  <Area type="monotone" dataKey="profit" name="Profit" stroke="#89a8d3" strokeWidth={2} fill="transparent" isAnimationActive={!reducedMotion} />
+                  <Area type="monotone" dataKey="sales" name="Sales" stroke="#2f65a7" strokeWidth={2.2} fill="url(#salesFill)" isAnimationActive={isAnimationActive} animationDuration={animationDuration} animationEasing={animationEasing} />
+                  <Area type="monotone" dataKey="profit" name="Profit" stroke="#89a8d3" strokeWidth={1.8} strokeDasharray="5 4" fill="transparent" isAnimationActive={isAnimationActive} animationDuration={animationDuration} animationEasing={animationEasing} animationBegin={120} />
                 </AreaChart>
               ) : (
-                <BarChart data={data} layout="vertical" margin={{ top: 5, right: 10, left: 5, bottom: 5 }}>
+                <BarChart key={isAnimationActive ? "animated" : "static"} data={data} layout="vertical" margin={{ top: 5, right: 10, left: 5, bottom: 5 }}>
+                  <defs>
+                    <pattern id={stripeId} width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                      <rect width="7" height="7" fill="#eaf0f8" />
+                      <line x1="0" y1="0" x2="0" y2="7" stroke="#9db7da" strokeWidth="2" />
+                    </pattern>
+                  </defs>
                   <CartesianGrid stroke="#edf0f5" strokeDasharray="3 4" horizontal={false} />
                   <XAxis type="number" tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 9 }} tickFormatter={(value: number) => new Intl.NumberFormat("en", { notation: "compact" }).format(value)} />
                   <YAxis type="category" dataKey={kind === "bar" ? "label" : "date"} width={88} tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 8 }} />
                   <Tooltip formatter={(value) => formatCurrency(Number(value))} />
-                  <Bar dataKey="sales" name="Sales" fill="#3e75bd" radius={[0, 5, 5, 0]} barSize={13} isAnimationActive={!reducedMotion} />
+                  <Bar dataKey="sales" name="Sales" radius={[0, 5, 5, 0]} barSize={13} isAnimationActive={isAnimationActive} animationDuration={animationDuration} animationEasing={animationEasing} animationBegin={80}>
+                    {data.map((entry, index) => (
+                      <Cell key={String(entry.label ?? entry.category ?? index)} fill={index % 2 === 0 ? "#3e75bd" : `url(#${stripeId})`} />
+                    ))}
+                  </Bar>
                 </BarChart>
               )}
             </ResponsiveContainer>
@@ -125,6 +135,7 @@ function ConnectedDashboard({
   onDateFromChange,
   onDateToChange,
   onClearDates,
+  modeBar,
 }: {
   data: Overview;
   dateFrom: string;
@@ -132,10 +143,12 @@ function ConnectedDashboard({
   onDateFromChange: (value: string) => void;
   onDateToChange: (value: string) => void;
   onClearDates: () => void;
+  modeBar?: ReactNode;
 }) {
   const categories = data.category_sales.map((row) => ({ ...row, label: row.category }));
   const topProducts = data.top_products.slice(0, 5);
   const cities = data.city_performance.slice(0, 5);
+  const margin = data.kpis?.profit_margin;
 
   return (
     <div className="page-stack">
@@ -143,6 +156,7 @@ function ConnectedDashboard({
         <div><p className="eyebrow">Your business, at a glance</p><h1 className="page-title">Overview dashboard</h1><p className="page-description">Calculated from <strong>{data.dataset_name}</strong> · {formatNumber(data.row_count)} records</p></div>
         <div className="page-actions"><Link href="/upload" className={cn(buttonVariants({ variant: "outline", size: "lg" }), "action-button")}>Change dataset</Link></div>
       </section>
+      {modeBar}
       <AnalyticsDateFilter
         dateFrom={dateFrom}
         dateTo={dateTo}
@@ -152,20 +166,80 @@ function ConnectedDashboard({
       />
       {!data.available ? <div className="connection-banner" role="status"><CircleAlert aria-hidden="true" /><span className="connection-copy"><strong>Some retail metrics are unavailable.</strong><span>Map the required fields to enable sales, profit, date, and category calculations: {data.missing_fields.join(", ")}.</span></span><Link href="/upload" className="connection-link">Review upload <ArrowRight aria-hidden="true" /></Link></div> : null}
       <section aria-label="Business performance metrics" className="metric-grid">
-        {metricCards.map(({ label, key, icon: Icon }) => <Card className="metric-card" key={key}><CardContent className="metric-content"><div className="metric-topline"><span className="metric-label">{label}</span><span className="metric-icon"><Icon aria-hidden="true" /></span></div><div className="metric-value">{metricValue(key, data.kpis?.[key])}</div><div className="metric-footnote">From {data.dataset_name}</div></CardContent></Card>)}
+        {metricCards.map(({ label, key, icon: Icon }, index) => {
+          const emphasis = index === 0;
+          return (
+            <Card className={cn("metric-card", emphasis && "metric-card-emphasis")} key={key}>
+              <CardContent className="metric-content">
+                <div className="metric-topline"><span className="metric-label">{label}</span><span className="metric-icon"><Icon aria-hidden="true" /></span></div>
+                <div className="metric-value"><MetricValue metricKey={key} value={data.kpis?.[key]} /></div>
+                {(key === "total_sales" || key === "total_profit") ? <KpiSparkline data={data.sales_by_month} dataKey={key === "total_sales" ? "sales" : "profit"} variant={emphasis ? "emphasis" : "default"} /> : null}
+                <div className="metric-footnote" title={data.dataset_name}>From active dataset</div>
+              </CardContent>
+            </Card>
+          );
+        })}
       </section>
       <section className="dashboard-grid dashboard-grid-primary"><ConnectedChart title="Sales vs. profit trends" data={data.sales_by_month} kind="trend" /><Card className="panel-card summary-card"><CardHeader><CardTitle className="panel-title">Business performance</CardTitle><p className="panel-subtitle">A summary of the current dataset</p></CardHeader><CardContent><div className="summary-placeholder"><span className="summary-ring"><BarChart3 aria-hidden="true" /></span><p className="empty-title">{formatNumber(data.row_count)} records analyzed</p><p className="empty-copy">Metrics are calculated by the existing Python analytics functions.</p><Link href="/sales-analytics" className="text-action">Explore analytics <ArrowRight aria-hidden="true" /></Link></div></CardContent></Card></section>
+      <section className="dashboard-grid dashboard-grid-split" aria-label="Revenue mix and margin health">
+        <Card className="panel-card">
+          <CardHeader className="panel-header"><div><CardTitle className="panel-title">Revenue by category</CardTitle><p className="panel-subtitle">Share of sales in this reporting period</p></div><Badge variant="secondary">Live data</Badge></CardHeader>
+          <CardContent><RevenueDonut rows={data.category_sales} /></CardContent>
+        </Card>
+        <Card className="panel-card">
+          <CardHeader className="panel-header"><div><CardTitle className="panel-title">Margin health</CardTitle><p className="panel-subtitle">Profit as a share of sales</p></div><Badge variant="outline">Calculated</Badge></CardHeader>
+          <CardContent><ProfitGauge margin={margin} /><p className="dashboard-footnote">Derived from total profit and total sales in the active dataset.</p></CardContent>
+        </Card>
+      </section>
       <section className="dashboard-grid dashboard-grid-secondary"><ConnectedChart title="Category-wise sales" data={categories} kind="bar" /><Card className="panel-card"><CardHeader><CardTitle className="panel-title">Top performing products</CardTitle><p className="panel-subtitle">Sorted by sales</p></CardHeader><CardContent><div className="ranked-list">{topProducts.length ? topProducts.map((row, index) => <div className="ranked-row" key={row.product_name}><span className="rank-number">{String(index + 1).padStart(2, "0")}</span><span className="rank-name">{row.product_name}</span><strong>{formatCurrency(row.sales)}</strong></div>) : <p className="empty-copy">No product column was mapped.</p>}</div></CardContent></Card><Card className="panel-card"><CardHeader><CardTitle className="panel-title">City-wise performance</CardTitle><p className="panel-subtitle">Sales by city</p></CardHeader><CardContent><div className="ranked-list">{cities.length ? cities.map((row) => <div className="ranked-row" key={row.city}><span className="rank-name">{row.city}</span><strong>{formatCurrency(row.sales)}</strong></div>) : <p className="empty-copy">No city column was mapped.</p>}</div></CardContent></Card></section>
-      <section className="dashboard-grid dashboard-grid-bottom"><Card className="panel-card"><CardHeader className="panel-header"><div><CardTitle className="panel-title">Recent transactions</CardTitle><p className="panel-subtitle">Latest dated records in the dataset</p></div></CardHeader><CardContent><div className="table-wrap"><Table><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Date</TableHead><TableHead>Product</TableHead><TableHead>City</TableHead><TableHead className="text-right">Sales</TableHead></TableRow></TableHeader><TableBody>{data.recent_transactions.map((row, index) => <TableRow key={`${row.order_id}-${index}`}><TableCell>{row.order_id}</TableCell><TableCell>{new Date(row.order_date).toLocaleDateString()}</TableCell><TableCell>{row.product_name}</TableCell><TableCell>{row.city}</TableCell><TableCell className="text-right">{formatCurrency(row.sales)}</TableCell></TableRow>)}</TableBody></Table></div></CardContent></Card><Card className="insight-card"><CardHeader><CardTitle className="panel-title">AI business insights</CardTitle><p className="panel-subtitle">Evidence-based observations</p></CardHeader><CardContent><div className="ranked-list">{data.insights.length ? data.insights.map((insight) => <p className="insight-copy" key={insight}>{insight}</p>) : <p className="empty-copy">No insight rules matched this dataset.</p>}</div><Link href="/business-insights" className="insight-link">Explore insights <ArrowRight aria-hidden="true" /></Link></CardContent></Card></section>
+      <section className="dashboard-grid dashboard-grid-bottom"><Card className="panel-card"><CardHeader className="panel-header"><div><CardTitle className="panel-title">Recent transactions</CardTitle><p className="panel-subtitle">Latest dated records in the dataset</p></div></CardHeader><CardContent>{data.recent_transactions.length ? <div className="table-wrap recent-transactions-wrap"><Table className="recent-transactions"><colgroup><col className="txn-col-order" /><col className="txn-col-date" /><col className="txn-col-product" /><col className="txn-col-city" /><col className="txn-col-sales" /></colgroup><TableHeader><TableRow><TableHead>Order</TableHead><TableHead>Date</TableHead><TableHead>Product</TableHead><TableHead>City</TableHead><TableHead className="text-right">Sales</TableHead></TableRow></TableHeader><TableBody>{data.recent_transactions.map((row, index) => <TableRow key={`${row.order_id}-${index}`}><TableCell className="txn-order" title={row.order_id}>{row.order_id}</TableCell><TableCell className="txn-date">{formatDate(row.order_date)}</TableCell><TableCell className="txn-product" title={row.product_name}>{row.product_name}</TableCell><TableCell className="txn-city" title={row.city}>{row.city}</TableCell><TableCell className="txn-sales">{formatCurrency(row.sales)}</TableCell></TableRow>)}</TableBody></Table></div> : <p className="empty-copy">No dated transactions were returned for this dataset.</p>}</CardContent></Card><Card className="insight-card"><CardHeader><CardTitle className="panel-title">AI business insights</CardTitle><p className="panel-subtitle">Evidence-based observations</p></CardHeader><CardContent><div className="ranked-list">{data.insights.length ? data.insights.map((insight) => <p className="insight-copy" key={insight}>{insight}</p>) : <p className="empty-copy">No insight rules matched this dataset.</p>}</div><Link href="/business-insights" className="insight-link">Explore insights <ArrowRight aria-hidden="true" /></Link></CardContent></Card></section>
       <p className="dashboard-footnote">All figures and charts on this page are calculated from the uploaded dataset using the existing Python backend.</p>
     </div>
   );
+}
+
+const DASHBOARD_MODE_KEY = "retailmind_dashboard_mode";
+const dashboardModeListeners = new Set<() => void>();
+
+function subscribeDashboardMode(listener: () => void) {
+  dashboardModeListeners.add(listener);
+  const onStorage = (event: StorageEvent) => {
+    if (event.key === DASHBOARD_MODE_KEY) listener();
+  };
+  window.addEventListener("storage", onStorage);
+  return () => {
+    dashboardModeListeners.delete(listener);
+    window.removeEventListener("storage", onStorage);
+  };
+}
+
+function readDashboardMode(): DashboardMode {
+  try {
+    return window.localStorage.getItem(DASHBOARD_MODE_KEY) === "custom" ? "custom" : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
+function serverDashboardMode(): DashboardMode {
+  return "auto";
 }
 
 export function DashboardRuntime() {
   const { dataset } = useDataset();
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const mode = useSyncExternalStore(subscribeDashboardMode, readDashboardMode, serverDashboardMode);
+
+  function changeMode(next: DashboardMode) {
+    try {
+      window.localStorage.setItem(DASHBOARD_MODE_KEY, next);
+    } catch {
+      /* The current mode still applies for this session. */
+    }
+    dashboardModeListeners.forEach((listener) => listener());
+  }
+
   const dateParams = new URLSearchParams();
   if (dateFrom) dateParams.set("date_from", dateFrom);
   if (dateTo) dateParams.set("date_to", dateTo);
@@ -176,6 +250,7 @@ export function DashboardRuntime() {
   const { data, error, isLoading } = useSWR<Overview>(endpoint, fetchOverview);
 
   if (!dataset) return <DashboardPage />;
+  if (mode === "custom") return <CustomizeDashboard key={dataset.id} datasetId={dataset.id} datasetName={dataset.filename} onModeChange={changeMode} />;
   if (error) return (
     <div className="page-stack">
       <AnalyticsDateFilter
@@ -197,6 +272,7 @@ export function DashboardRuntime() {
       onDateFromChange={setDateFrom}
       onDateToChange={setDateTo}
       onClearDates={() => { setDateFrom(""); setDateTo(""); }}
+      modeBar={<DashboardModeBar mode={mode} onChange={changeMode} />}
     />
   );
 }

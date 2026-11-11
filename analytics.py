@@ -10,6 +10,8 @@ import math
 
 import pandas as pd
 
+from retailmind.utils import to_numeric_loose
+
 
 REQUIRED_COLUMNS = {"order_id", "order_date", "category", "product_name", "city", "sales", "profit"}
 
@@ -20,8 +22,8 @@ def prepare_data(frame: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError("Missing required columns: " + ", ".join(sorted(missing)))
     data = frame.copy()
-    data["sales"] = pd.to_numeric(data["sales"], errors="coerce").fillna(0.0)
-    data["profit"] = pd.to_numeric(data["profit"], errors="coerce").fillna(0.0)
+    data["sales"] = to_numeric_loose(data["sales"]).fillna(0.0)
+    data["profit"] = to_numeric_loose(data["profit"]).fillna(0.0)
     data["order_date"] = pd.to_datetime(data["order_date"], errors="coerce")
     for column in ("order_id", "category", "product_name", "city", "region", "sales_rep", "payment_method", "customer"):
         if column not in data.columns:
@@ -29,7 +31,7 @@ def prepare_data(frame: pd.DataFrame) -> pd.DataFrame:
         data[column] = data[column].astype("string").str.strip().replace("", pd.NA)
     for column in ("quantity", "unit_price", "discount"):
         if column in data.columns:
-            data[column] = pd.to_numeric(data[column], errors="coerce")
+            data[column] = to_numeric_loose(data[column])
     return data
 
 

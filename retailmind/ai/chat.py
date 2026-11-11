@@ -277,6 +277,84 @@ def _explain_response(frame: pd.DataFrame, schema: DatasetSchema, intent: QueryI
     return ChatResponse(text + note, table=table, intent=intent, used_llm=used_llm, verified=True, followups=["Which product has the highest revenue?", "Show sales by month"])
 
 
+def _summary_requested(question: str, intent: QueryIntent) -> bool:
+    if intent.kind in {"top", "compare", "distribution"}:
+        return False
+    text = question.lower()
+    explicit_summary = any(term in text for term in ("summary", "overview", "performance snapshot", "key metrics", "business performance"))
+    if intent.kind == "explain" and not explicit_summary:
+        return False
+    metrics = sum(term in text for term in ("sales", "revenue", "profit", "margin", "order", "record", "customer"))
+    return metrics >= 2 or explicit_summary
+
+
+def _summary_response(frame: pd.DataFrame, schema: DatasetSchema, intent: QueryIntent) -> ChatResponse:
+    """Answer multi-metric summary questions with verified pandas figures."""
+    scoped = _filter_period(frame, schema, intent.period.current() if intent.period else None)
+    revenue_column = schema.role_column("revenue")
+    profit_column = schema.role_column("profit")
+    order_column = schema.role_column("order_id")
+    category_column = schema.role_column("category")
+    product_column = schema.role_column("product")
+
+    revenue = pd.to_numeric(scoped[revenue_column], errors="coerce").sum() if revenue_column else None
+    profit = pd.to_numeric(scoped[profit_column], errors="coerce").sum() if profit_column else None
+    margin = safe_divide(profit, revenue) if revenue and profit is not None else None
+    order_count = int(scoped[order_column].nunique(dropna=True)) if order_column else None
+
+    lines = ["**Business Performance Summary**", ""]
+    index = 1
+    if revenue is not None:
+        lines.append(f"{index}. **Total Revenue:** {money(float(revenue))}")
+        index += 1
+    if profit is not None:
+        lines.append(f"{index}. **Total Profit:** {money(float(profit))}")
+        index += 1
+    if margin is not None:
+        lines.append(f"{index}. **Profit Margin:** {safe_percent(margin)}")
+        index += 1
+    if order_count is not None:
+        lines.append(f"{index}. **Total Orders:** {order_count:,}")
+        index += 1
+    lines.append(f"{index}. **Total Records:** {len(scoped):,}")
+
+    insights: list[str] = []
+    for label, column in (("category", category_column), ("product", product_column)):
+        if not column or column not in scoped.columns or not revenue_column:
+            continue
+        working = scoped[[column, revenue_column]].copy()
+        working[revenue_column] = pd.to_numeric(working[revenue_column], errors="coerce")
+        grouped = working.dropna(subset=[revenue_column]).groupby(working[column].astype("string"))[revenue_column].sum().sort_values(ascending=False)
+        if not grouped.empty:
+            insights.append(f"Top {label} by revenue: **{grouped.index[0]}** ({money(float(grouped.iloc[0]))}).")
+
+    if category_column and category_column in scoped.columns and revenue_column and profit_column:
+        working = scoped[[category_column, revenue_column, profit_column]].copy()
+        working[revenue_column] = pd.to_numeric(working[revenue_column], errors="coerce")
+        working[profit_column] = pd.to_numeric(working[profit_column], errors="coerce")
+        grouped = working.dropna().groupby(working[category_column].astype("string"))[[revenue_column, profit_column]].sum()
+        grouped = grouped[grouped[revenue_column] > 0]
+        if not grouped.empty:
+            grouped["margin"] = grouped[profit_column] / grouped[revenue_column]
+            weakest = grouped.sort_values("margin").iloc[0]
+            insights.append(f"Lowest-margin category: **{grouped.sort_values('margin').index[0]}** ({safe_percent(float(weakest['margin']))}) — review pricing and discounts.")
+
+    if insights:
+        lines.extend(["", "**Key Insights**"])
+        lines.extend(f"- {insight}" for insight in insights)
+    lines.extend([
+        "",
+        "**Recommended Actions**",
+        "- Protect revenue concentration by reviewing performance in your top categories.",
+        "- Investigate low-margin groups before increasing discounts or promotions.",
+    ])
+    return ChatResponse(
+        "\n".join(lines),
+        intent=intent,
+        followups=["Show revenue by month", "Which category has the best margin?", "Who are the top customers?"],
+    )
+
+
 def answer_question(
     question: str,
     frame: pd.DataFrame,
@@ -299,6 +377,9 @@ def answer_question(
     if referential and intent.dimension_column is None and last.get("dimension_column") in schema.columns:
         intent.dimension_column = last.get("dimension_column")
         intent.dimension_role = last.get("dimension_role")
+
+    if _summary_requested(question, intent):
+        return _summary_response(frame, schema, intent)
 
     if intent.kind == "unknown":
         suggestions = suggested_questions(schema)

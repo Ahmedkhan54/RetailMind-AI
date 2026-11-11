@@ -21,6 +21,8 @@ async function proxyRequest(request: Request, context: RouteContext) {
       headers,
       body: request.method === "GET" || request.method === "HEAD" ? undefined : await request.arrayBuffer(),
       cache: "no-store",
+      // Do not let a stalled upstream hold the browser request open forever.
+      signal: AbortSignal.timeout(60000),
     });
     const responseHeaders = new Headers();
     for (const header of ["content-type", "content-disposition", "cache-control", "set-cookie", "x-cleaning-report"]) {

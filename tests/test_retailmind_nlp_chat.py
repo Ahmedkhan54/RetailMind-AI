@@ -9,7 +9,7 @@ import pandas as pd
 from retailmind.ai.chat import answer_question, suggested_questions
 from retailmind.ai.nlp import parse_period, parse_question
 from retailmind.schema import apply_manual_mapping, infer_schema
-from retailmind.utils import money
+from retailmind.utils import money, safe_percent
 
 
 def retail_frame() -> pd.DataFrame:
@@ -171,6 +171,21 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(response.intent.kind, "unknown")
         self.assertIn("never invent a number", response.text)
         self.assertTrue(response.followups)
+
+    def test_multi_metric_summary_uses_verified_values(self):
+        response = answer_question(
+            "Give me a business performance summary with sales, profit and margin",
+            self.frame,
+            self.schema,
+        )
+        revenue = self.frame["Sales"].sum()
+        profit = self.frame["Profit"].sum()
+        self.assertIn("Business Performance Summary", response.text)
+        self.assertIn(money(revenue), response.text)
+        self.assertIn(money(profit), response.text)
+        self.assertIn(safe_percent(profit / revenue), response.text)
+        self.assertIn(f"Total Records:** {len(self.frame)}", response.text)
+        self.assertIn("Key Insights", response.text)
 
     def test_suggested_questions_only_use_available_roles(self):
         questions = suggested_questions(self.schema)

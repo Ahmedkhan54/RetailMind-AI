@@ -1,12 +1,17 @@
 "use client";
 
-import { useRef, useState, type ChangeEvent, type DragEvent, type FormEvent } from "react";
+import { useRef, useState, type ChangeEvent, type DragEvent, type FormEvent, type ReactNode } from "react";
 import { AnalyticsDateFilter } from "@/components/analytics-date-filter";
-import { useReducedMotion } from "@/lib/use-reduced-motion";
+import { useChartAnimation, useAnimationPreference } from "@/lib/animation-preference";
+import { AnimatedNumber } from "@/components/ui/animated-number";
+import { formatCompactCurrency, formatCurrency, formatCurrencyPrecise, formatDate, formatNumber, formatPercent } from "@/lib/format";
 import useSWR, { useSWRConfig } from "swr";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useDataset, useSession, type ActiveDataset } from "@/components/providers";
+import { VisualAnalyticsPage } from "@/components/visual-analytics";
+import { IndiaMapPage } from "@/components/india-map";
+import { CityAnalyticsPage } from "@/components/city-analytics";
 import {
   Activity,
   ArrowRight,
@@ -29,7 +34,7 @@ import {
   Wrench,
   Users,
 } from "lucide-react";
-import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, Cell, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -359,11 +364,14 @@ function UploadPage({ item }: { item: NavigationItem }) {
       setProgress(100);
       setDataset({ id: result.dataset_id, filename: result.filename, uploadedAt: new Date().toISOString(), rows: result.row_count, columns: result.columns, preview: result.preview, mapping: result.mapping, profile: result.profile, quality: result.quality });
       await Promise.all([refreshDatasets(), refreshHistory()]);
-      setMessage("Dataset processed and saved to your account.");
-      setMessageIsError(false);
+      const salesDetected = Boolean(result.mapping.sales);
+      setMessage(salesDetected
+        ? "Dataset processed and saved to your account."
+        : "The file was uploaded, but no Sales/Revenue column was detected. Map the Sales column below and apply the mapping to continue.");
+      setMessageIsError(!salesDetected);
       setFile(null);
       if (inputRef.current) inputRef.current.value = "";
-      router.push("/overview");
+      if (salesDetected) router.push("/overview");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "The Python API could not process this file.");
       setMessageIsError(true);
@@ -382,7 +390,7 @@ function UploadPage({ item }: { item: NavigationItem }) {
             <p className="panel-subtitle">CSV and Excel files up to 25 MB are supported by the existing backend.</p>
           </CardHeader>
           <CardContent>
-            <input ref={inputRef} className="sr-only" type="file" accept=".csv,.xlsx,.xls,.xlsm" aria-label="Choose a CSV or Excel dataset" onChange={handleFileChange} />
+            <input ref={inputRef} className="sr-only" type="file" accept=".csv,.xlsx,.xls,.xlsm,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/vnd.ms-excel.sheet.macroEnabled.12" aria-label="Choose a CSV or Excel dataset" onChange={handleFileChange} />
             <div
               className={cn("upload-dropzone", dragging && "upload-dropzone-active")}
               role="button"
@@ -484,22 +492,51 @@ function ActivityPage({ item }: { item: NavigationItem }) {
 
 type AnalysisRow = Record<string, string | number | boolean | null>;
 type AnalysisResult = { available: boolean; rows?: AnalysisRow[]; recommendations?: AnalysisRow[]; notes?: string[]; assumptions?: string[]; stock_available?: boolean };
+type AlertPreferences = { enabled: boolean; configured: boolean; smtp_ready: boolean; min_severity: "critical" | "warning" | "info"; frequency: "instant" | "daily"; recipient_count: number; missing: string[] };
+
 type IntelligenceResult = {
   available: boolean;
   insights?: string[];
   alerts?: {
     id?: string; title: string; description: string; severity: string; suggestion: string; metric: string;
-    status?: "new" | "acknowledged" | "dismissed"; current_value?: number | null; previous_value?: number | null;
+    status?: "new" | "acknowledged" | "dismissed" | "resolved"; current_value?: number | null; previous_value?: number | null;
     pct_change?: number | null; comparison_period?: string; scope?: string; evidence?: Record<string, unknown>;
-    acknowledged_at?: string | null; detected_at?: string;
+    acknowledged_at?: string | null; detected_at?: string; severity_label?: string; scope_label?: string; scope_dimension?: string;
   }[];
+  email?: { enabled: boolean; configured: boolean; status: string; missing?: string[]; sent?: { alert_id: string; title: string; delivery: string }[]; failed?: { alert_id: string; title: string; delivery: string }[] };
   summary?: AnalysisRow[];
   customers?: AnalysisRow[];
   customer_total?: number;
   customer_offset?: number;
   customer_limit?: number;
+  cluster_count?: number;
+  silhouette?: number | null;
+  tags?: Record<string, number>;
+  tag_total?: number;
   notes?: string[];
+}
+
+const TAG_CLASSES: Record<string, string> = {
+  VIP: "tag-vip",
+  Loyal: "tag-loyal",
+  New: "tag-new",
+  Regular: "tag-regular",
+  "At Risk": "tag-at-risk",
+  Lost: "tag-lost",
 };
+
+function TagBadge({ tag }: { tag: string }) {
+  return <span className={`tag-badge ${TAG_CLASSES[tag] ?? "tag-regular"}`}>{tag}</span>;
+}
+
+const SEGMENT_GUIDANCE: Record<string, string> = {
+  "Big Spenders": "High monetary value. Protect with loyalty perks and early access rather than blanket discounts.",
+  "Loyal Customers": "Consistent repeat buyers. Grow basket size with cross-sell and referral offers.",
+  "Potential Loyalists": "Recent repeat activity. Nurture with a second-purchase incentive.",
+  "New Customers": "First purchase only. Onboard quickly and measure the second-order conversion.",
+  "At-Risk Customers": "Previously valuable but inactive. Run a win-back campaign before they lapse.",
+  "Churn Risk Customers": "Low recency and frequency. Prioritise reactivation or accept controlled attrition.",
+};;
 
 async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url, { cache: "no-store" });
@@ -557,7 +594,35 @@ function AnalyticsPage({ item }: { item: NavigationItem }) {
   const endpoint = dataset ? `${baseEndpoint}${query ? `?${query}` : ""}` : null;
   const { data, error, isLoading } = useSWR<AnalysisResult>(endpoint, fetchAnalysis);
   const rows = inventory ? data?.recommendations ?? [] : data?.rows ?? [];
+  const { isAnimationActive, animationDuration, animationEasing } = useChartAnimation();
   const fields = rows.length ? Object.keys(rows[0]) : [];
+  const labelField = fields[0];
+  const preferredMetricFields = ["sales", "revenue", "recommended_order_quantity", "profit", "quantity"];
+  const chartField = preferredMetricFields.find((field) => fields.includes(field))
+    ?? fields.find((field) => typeof rows[0]?.[field] === "number");
+  const chartRows = chartField
+    ? rows.filter((row) => typeof row[chartField] === "number").slice(0, 8).map((row) => ({
+        label: String(row[labelField] ?? "—").slice(0, 30),
+        value: Number(row[chartField]),
+      }))
+    : [];
+  const salesField = fields.includes("sales") ? "sales" : fields.includes("revenue") ? "revenue" : null;
+  const totalSales = salesField
+    ? rows.reduce((sum, row) => {
+        const value = row[salesField];
+        return sum + (typeof value === "number" ? value : 0);
+      }, 0)
+    : null;
+  const marginValues = rows
+    .map((row) => row.margin)
+    .filter((value): value is number => typeof value === "number");
+  const averageMargin = marginValues.length ? marginValues.reduce((sum, value) => sum + value, 0) / marginValues.length : null;
+  const totalRecommended = fields.includes("recommended_order_quantity")
+    ? rows.reduce((sum, row) => {
+        const value = row.recommended_order_quantity;
+        return sum + (typeof value === "number" ? value : 0);
+      }, 0)
+    : null;
 
   function formatCell(key: string, value: string | number | boolean | null) {
     if (value == null) return "—";
@@ -588,6 +653,33 @@ function AnalyticsPage({ item }: { item: NavigationItem }) {
       {isLoading ? <div className="loading-panel" aria-live="polite" /> : null}
       {error ? <p className="assistant-error" role="alert">{error.message}</p> : null}
       {data && !data.available ? <div className="backend-notice" role="status"><CircleAlert aria-hidden="true" /><span>{data.notes?.join(" ") || "This analysis is not available for the uploaded dataset."}</span></div> : null}
+      {data?.available && rows.length ? (
+        <section className="analytics-summary" aria-label="Calculated summary">
+          <Card className="metric-card"><CardContent className="metric-content"><div className="metric-topline"><span className="metric-label">{inventory ? "Recommendations" : "Groups returned"}</span><span className="metric-icon"><Database aria-hidden="true" /></span></div><div className="metric-value"><AnimatedNumber value={rows.length} format={(value) => formatNumber(value, 0)} /></div><div className="metric-footnote">From the existing analytics engine</div></CardContent></Card>
+          <Card className="metric-card"><CardContent className="metric-content"><div className="metric-topline"><span className="metric-label">{inventory ? "Recommended units" : salesField === "revenue" ? "Total revenue" : "Total sales"}</span><span className="metric-icon"><FileBarChart2 aria-hidden="true" /></span></div><div className="metric-value"><AnimatedNumber value={inventory ? totalRecommended : totalSales} format={(value) => formatCompactCurrency(value)} /></div><div className="metric-footnote">Aggregated from the returned rows</div></CardContent></Card>
+          <Card className="metric-card"><CardContent className="metric-content"><div className="metric-topline"><span className="metric-label">{inventory ? "Average recommendation" : "Average margin"}</span><span className="metric-icon"><Activity aria-hidden="true" /></span></div><div className="metric-value"><AnimatedNumber value={inventory ? (totalRecommended != null ? totalRecommended / Math.max(1, rows.length) : null) : (averageMargin != null ? averageMargin * 100 : null)} format={(value) => inventory ? formatNumber(value) : formatPercent(value)} /></div><div className="metric-footnote">Computed from the same response</div></CardContent></Card>
+        </section>
+      ) : null}
+      {data?.available && rows.length && chartRows.length ? (
+        <Card className="panel-card">
+          <CardHeader className="panel-header"><div><CardTitle className="panel-title">Top {inventory ? "replenishment items" : "groups"} by {String(chartField).replaceAll("_", " ")}</CardTitle><p className="panel-subtitle">Top {chartRows.length} of {rows.length.toLocaleString()} rows returned by the API</p></div><Badge variant="secondary">Live dataset</Badge></CardHeader>
+          <CardContent>
+            <div className="analytics-chart">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart key={isAnimationActive ? "animated" : "static"} data={chartRows} layout="vertical" margin={{ top: 4, right: 16, left: 4, bottom: 4 }}>
+                  <CartesianGrid stroke="#edf0f5" strokeDasharray="3 4" horizontal={false} />
+                  <XAxis type="number" tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 9 }} tickFormatter={(value: number) => new Intl.NumberFormat("en-IN", { notation: "compact", maximumFractionDigits: 1 }).format(value)} />
+                  <YAxis type="category" dataKey="label" width={116} tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 8 }} />
+                  <Tooltip formatter={(value) => ["sales", "revenue", "profit"].includes(String(chartField)) ? formatCurrency(Number(value)) : formatNumber(Number(value))} />
+                  <Bar dataKey="value" name={String(chartField).replaceAll("_", " ")} radius={[0, 6, 6, 0]} barSize={14} isAnimationActive={isAnimationActive} animationDuration={animationDuration} animationEasing={animationEasing}>
+                    {chartRows.map((row, index) => <Cell key={`${row.label}-${index}`} fill={index % 2 === 0 ? "#3e75bd" : "#a6c4f1"} />)}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
       {data?.available && rows.length ? <Card className="panel-card"><CardHeader className="panel-header"><div><CardTitle className="panel-title">{inventory ? "Replenishment recommendations" : "Calculated results"}</CardTitle><p className="panel-subtitle">{rows.length.toLocaleString()} {inventory ? "recommendations" : "groups"} from the existing Python analytics engine</p></div><div className="analytics-card-actions"><Badge variant="secondary">Live dataset</Badge>{inventory ? <Button type="button" variant="outline" size="sm" onClick={() => downloadRowsAsCsv("inventory-recommendations.csv", rows)}>Download CSV</Button> : null}</div></CardHeader><CardContent><div className="table-wrap"><Table><TableHeader><TableRow>{fields.map((field) => <TableHead key={field}>{field.replaceAll("_", " ")}</TableHead>)}</TableRow></TableHeader><TableBody>{rows.slice(0, 100).map((row, index) => <TableRow key={String(row[fields[0]]) + index}>{fields.map((field) => <TableCell key={field}>{formatCell(field, row[field])}</TableCell>)}</TableRow>)}</TableBody></Table></div>{data.assumptions?.length ? <div className="inventory-assumptions">{data.assumptions.map((assumption) => <p key={assumption}>{assumption}</p>)}</div> : null}</CardContent></Card> : null}
       {data?.notes?.length ? <p className="dashboard-footnote">{data.notes.join(" ")}</p> : null}
     </div>
@@ -596,6 +688,267 @@ function AnalyticsPage({ item }: { item: NavigationItem }) {
 
 function InfoCard({ icon: Icon, title, text }: { icon: typeof Check; title: string; text: string }) {
   return <Card className="info-card"><CardContent><span className="info-icon"><Icon aria-hidden="true" /></span><strong>{title}</strong><p>{text}</p></CardContent></Card>;
+}
+
+type StockColumn = { key: string; label: string; kind?: "number" | "date" };
+
+const STOCK_COLUMNS: StockColumn[] = [
+  { key: "product", label: "Product" },
+  { key: "status", label: "Status" },
+  { key: "current_stock", label: "Current stock", kind: "number" },
+  { key: "avg_daily_sales", label: "Avg daily sales", kind: "number" },
+  { key: "forecast_daily_demand", label: "Forecast daily demand", kind: "number" },
+  { key: "safety_stock", label: "Safety stock", kind: "number" },
+  { key: "reorder_point", label: "Reorder point", kind: "number" },
+  { key: "days_remaining", label: "Days remaining", kind: "number" },
+  { key: "estimated_depletion_date", label: "Est. depletion", kind: "date" },
+  { key: "suggested_reorder_quantity", label: "Suggested reorder", kind: "number" },
+];
+
+function stockCellValue(value: string | number | boolean | null, kind?: StockColumn["kind"]) {
+  if (value == null || value === "") return "—";
+  if (kind === "number" && typeof value === "number") return formatNumber(value, 2);
+  if (kind === "date" && typeof value === "string") {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+  }
+  return String(value);
+}
+
+function StockRecommendationsPage({ item }: { item: NavigationItem }) {
+  const { dataset } = useDataset();
+  const { isAnimationActive, animationDuration, animationEasing } = useChartAnimation();
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [sortKey, setSortKey] = useState("suggested_reorder_quantity");
+  const [sortDescending, setSortDescending] = useState(true);
+
+  const params = new URLSearchParams();
+  if (dateFrom) params.set("date_from", dateFrom);
+  if (dateTo) params.set("date_to", dateTo);
+  const query = params.toString();
+  const endpoint = dataset ? `/api/retailmind/inventory/${encodeURIComponent(dataset.id)}${query ? `?${query}` : ""}` : null;
+  const { data, error, isLoading } = useSWR<AnalysisResult>(endpoint, fetchAnalysis);
+
+  const rows = data?.recommendations ?? [];
+  const statuses = Array.from(new Set(rows.map((row) => String(row.status ?? "")).filter(Boolean))).sort();
+  const numeric = (row: AnalysisRow, key: string) => (typeof row[key] === "number" ? (row[key] as number) : null);
+  const lowStockStatuses = ["Out of stock", "Critical — reorder now", "Low — reorder soon"];
+  const needsReorder = rows.filter((row) => lowStockStatuses.includes(String(row.status ?? ""))).length;
+  const overstocked = rows.filter((row) => String(row.status ?? "") === "Overstock — review cover").length;
+  const reorderRow = (action: "reorder" | "healthy") =>
+    rows.some((row) => {
+      const status = String(row.status ?? "");
+      if (action === "healthy") return status === "Healthy";
+      return lowStockStatuses.includes(status);
+    });
+
+  const filteredRows = rows
+    .filter((row) => {
+      const term = search.trim().toLowerCase();
+      const matchesSearch = !term || String(row.product ?? "").toLowerCase().includes(term);
+      const matchesStatus = statusFilter === "all" || String(row.status ?? "") === statusFilter;
+      return matchesSearch && matchesStatus;
+    })
+    .sort((left, right) => {
+      const a = numeric(left, sortKey);
+      const b = numeric(right, sortKey);
+      const leftValue = a ?? Number.NEGATIVE_INFINITY;
+      const rightValue = b ?? Number.NEGATIVE_INFINITY;
+      return sortDescending ? rightValue - leftValue : leftValue - rightValue;
+    });
+
+  const totalSuggested = rows.reduce((sum, row) => sum + (numeric(row, "suggested_reorder_quantity") ?? 0), 0);
+  const chartMetric = rows.some((row) => numeric(row, "suggested_reorder_quantity") != null)
+    ? "suggested_reorder_quantity"
+    : "reorder_point";
+  const chartRows = [...rows]
+    .filter((row) => numeric(row, chartMetric) != null)
+    .sort((left, right) => (numeric(right, chartMetric) ?? 0) - (numeric(left, chartMetric) ?? 0))
+    .slice(0, 10)
+    .map((row) => ({ label: String(row.product ?? "—").slice(0, 26), value: numeric(row, chartMetric) ?? 0 }));
+
+  function toggleSort(key: string) {
+    if (sortKey === key) setSortDescending((value) => !value);
+    else {
+      setSortKey(key);
+      setSortDescending(true);
+    }
+  }
+
+  return (
+    <div className="page-stack">
+      <PageHeading item={item} />
+      <div className="filter-row">
+        <span className="filter-note"><Database aria-hidden="true" /> {dataset ? `${dataset.filename} · demand and reorder planning from the Python inventory engine` : "Select a dataset to calculate replenishment needs"}</span>
+        <AnalyticsDateFilter
+          dateFrom={dateFrom}
+          dateTo={dateTo}
+          disabled={!dataset}
+          onDateFromChange={setDateFrom}
+          onDateToChange={setDateTo}
+          onClear={() => { setDateFrom(""); setDateTo(""); }}
+        />
+      </div>
+
+      {!dataset ? <EmptyState icon={PackageSearch} title="Choose a dataset to begin" description="Stock recommendations need a product, a sales date, and a quantity sold. Add a current-stock column to unlock days remaining and suggested quantities." action="Upload a dataset" /> : null}
+      {isLoading ? <div className="loading-panel" aria-live="polite" /> : null}
+      {error ? <p className="assistant-error" role="alert">{error.message}</p> : null}
+      {data && !data.available ? <div className="backend-notice" role="status"><CircleAlert aria-hidden="true" /><span>{data.notes?.join(" ") || "Stock recommendations are unavailable for this dataset."}</span></div> : null}
+
+      {data?.available && rows.length ? (
+        <>
+          <section className="metric-grid analytics-summary" aria-label="Stock recommendation metrics">
+            <Card className="metric-card"><CardContent className="metric-content"><div className="metric-topline"><span className="metric-label">Products analysed</span><span className="metric-icon"><PackageSearch aria-hidden="true" /></span></div><div className="metric-value"><AnimatedNumber value={rows.length} format={(value) => formatNumber(value, 0)} /></div><div className="metric-footnote">From the mapped product field</div></CardContent></Card>
+            <Card className="metric-card"><CardContent className="metric-content"><div className="metric-topline"><span className="metric-label">Products needing action</span><span className="metric-icon"><CircleAlert aria-hidden="true" /></span></div><div className="metric-value"><AnimatedNumber value={needsReorder} format={(value) => formatNumber(value, 0)} /></div><div className="metric-footnote">Out of stock, critical, or low{overstocked ? ` · ${overstocked} overstocked` : ""}</div></CardContent></Card>
+            <Card className="metric-card"><CardContent className="metric-content"><div className="metric-topline"><span className="metric-label">Suggested reorder units</span><span className="metric-icon"><Activity aria-hidden="true" /></span></div><div className="metric-value"><AnimatedNumber value={data.stock_available ? totalSuggested : null} format={(value) => formatNumber(value, 0)} /></div><div className="metric-footnote">{data.stock_available ? "Requires a current-stock column" : "Add a current-stock column to unlock"}</div></CardContent></Card>
+            <Card className="metric-card"><CardContent className="metric-content"><div className="metric-topline"><span className="metric-label">Stock state</span><span className="metric-icon"><Database aria-hidden="true" /></span></div><div className="metric-value stock-state-value">{data.stock_available ? (reorderRow("reorder") ? "Reorder" : "Healthy") : "No stock data"}</div><div className="metric-footnote">{data.stock_available ? "Derived from observed stock levels" : "Demand planning only"}</div></CardContent></Card>
+          </section>
+
+          {!data.stock_available ? (
+            <div className="backend-notice" role="status"><CircleAlert aria-hidden="true" /><span>{data.notes?.join(" ") || "No current-stock column was found. Demand, safety stock, and reorder points are calculated, but days remaining, depletion dates, and suggested quantities need a stock level."}</span></div>
+          ) : null}
+
+          {chartRows.length ? (
+            <Card className="panel-card">
+              <CardHeader className="panel-header"><div><CardTitle className="panel-title">Top replenishment needs</CardTitle><p className="panel-subtitle">Top {chartRows.length} products by {chartMetric === "suggested_reorder_quantity" ? "suggested reorder quantity" : "reorder point"}</p></div><Badge variant="secondary">Live dataset</Badge></CardHeader>
+              <CardContent>
+                <div className="analytics-chart">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart key={isAnimationActive ? "animated" : "static"} data={chartRows} layout="vertical" margin={{ top: 4, right: 16, left: 4, bottom: 4 }}>
+                      <CartesianGrid stroke="#edf0f5" strokeDasharray="3 4" horizontal={false} />
+                      <XAxis type="number" tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 9 }} tickFormatter={(value: number) => new Intl.NumberFormat("en-IN", { notation: "compact", maximumFractionDigits: 1 }).format(value)} />
+                      <YAxis type="category" dataKey="label" width={126} tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 8 }} />
+                      <Tooltip formatter={(value) => [formatNumber(Number(value), 2), chartMetric === "suggested_reorder_quantity" ? "Suggested reorder" : "Reorder point"]} />
+                      <Bar dataKey="value" name="Units" radius={[0, 6, 6, 0]} barSize={14} isAnimationActive={isAnimationActive} animationDuration={animationDuration} animationEasing={animationEasing}>
+                        {chartRows.map((row, index) => <Cell key={`${row.label}-${index}`} fill={index % 2 === 0 ? "#3e75bd" : "#a6c4f1"} />)}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
+
+          <Card className="panel-card">
+            <CardHeader className="panel-header">
+              <div><CardTitle className="panel-title">Replenishment recommendations</CardTitle><p className="panel-subtitle">{filteredRows.length} of {rows.length} products shown · demand, safety stock, reorder point, and status are calculated by the existing inventory module</p></div>
+              <Button type="button" variant="outline" size="sm" disabled={!filteredRows.length} onClick={() => downloadRowsAsCsv("stock-recommendations.csv", filteredRows)}>Download CSV</Button>
+            </CardHeader>
+            <CardContent>
+              <div className="stock-toolbar">
+                <label className="compact-field"><span>Search product</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Filter products…" /></label>
+                <label className="compact-field"><span>Status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="all">All statuses</option>{statuses.map((status) => <option key={status} value={status}>{status}</option>)}</select></label>
+                <label className="compact-field"><span>Sort by</span><select value={sortKey} onChange={(event) => setSortKey(event.target.value)}>{STOCK_COLUMNS.filter((column) => column.kind === "number" || column.key === "product").map((column) => <option key={column.key} value={column.key}>{column.label}</option>)}</select></label>
+                <Button type="button" variant="outline" size="sm" onClick={() => toggleSort(sortKey)}>{sortDescending ? "Descending ↓" : "Ascending ↑"}</Button>
+              </div>
+              <div className="table-wrap">
+                <Table>
+                  <TableHeader><TableRow>{STOCK_COLUMNS.map((column) => <TableHead key={column.key}>{column.label}</TableHead>)}</TableRow></TableHeader>
+                  <TableBody>
+                    {filteredRows.slice(0, 250).map((row, index) => (
+                      <TableRow key={`${String(row.product)}-${index}`}>
+                        {STOCK_COLUMNS.map((column) => (
+                          <TableCell key={column.key} className={column.key === "status" ? "stock-status-cell" : undefined}>{stockCellValue(row[column.key], column.kind)}</TableCell>
+                        ))}
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+              {!filteredRows.length ? <p className="empty-copy">No products match the current search and status filters.</p> : null}
+              {data.assumptions?.length ? <div className="inventory-assumptions">{data.assumptions.map((assumption) => <p key={assumption}>{assumption}</p>)}</div> : null}
+              {data.notes?.length ? <p className="dashboard-footnote">{data.notes.join(" ")}</p> : null}
+            </CardContent>
+          </Card>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+
+function highlightInline(text: string, keyPrefix: string): ReactNode[] {
+  return text.split(/(₹\s?[\d,]+(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s?%|\b\d{1,3}(?:,\d{2,3})+(?:\.\d+)?\b)/g).map((part, index) =>
+    /^(₹|\d)/.test(part) && /[\d%]/.test(part)
+      ? <span className="answer-figure" key={`${keyPrefix}-figure-${index}`}>{part}</span>
+      : <span key={`${keyPrefix}-text-${index}`}>{part}</span>,
+  );
+}
+
+function highlightFigures(text: string): ReactNode[] {
+  // Support inline **emphasis** from the verified answer composer without
+  // rendering raw Markdown markers to the user.
+  return text.split(/(\*\*[^*]+\*\*)/g).filter(Boolean).map((part, index) =>
+    part.startsWith("**") && part.endsWith("**")
+      ? <strong key={`bold-${index}`}>{part.slice(2, -2)}</strong>
+      : <span key={`inline-${index}`}>{highlightInline(part, `inline-${index}`)}</span>,
+  );
+}
+
+/** Lightweight, safe renderer for the assistant's plain-text answers. */
+function StructuredAnswer({ text }: { text: string }) {
+  const lines = text.replaceAll("\r\n", "\n").split("\n");
+  const blocks: ReactNode[] = [];
+  let list: { ordered: boolean; items: string[] } | null = null;
+  let table: string[][] = [];
+
+  function flush() {
+    if (list) {
+      const Tag = list.ordered ? "ol" : "ul";
+      blocks.push(<Tag key={`list-${blocks.length}`}>{list.items.map((item, index) => <li key={index}>{highlightFigures(item)}</li>)}</Tag>);
+      list = null;
+    }
+    if (table.length) {
+      const [header, ...rows] = table.filter((row) => !row.every((cell) => /^:?-{2,}:?$/.test(cell.trim())));
+      blocks.push(
+        <div className="table-wrap" key={`table-${blocks.length}`}>
+          <table>
+            <thead><tr>{header.map((cell, index) => <th key={index}>{cell.trim()}</th>)}</tr></thead>
+            <tbody>{rows.map((row, rowIndex) => <tr key={rowIndex}>{row.map((cell, cellIndex) => <td key={cellIndex}>{highlightFigures(cell.trim())}</td>)}</tr>)}</tbody>
+          </table>
+        </div>,
+      );
+      table = [];
+    }
+  }
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    const trimmed = line.trim();
+    if (!trimmed) { flush(); continue; }
+    if (/^\|.*\|$/.test(trimmed)) {
+      if (list) flush();
+      table.push(trimmed.slice(1, -1).split("|"));
+      continue;
+    }
+    if (table.length) flush();
+    const heading = trimmed.match(/^#{1,6}\s+(.+)$/);
+    const boldHeading = trimmed.match(/^\*\*(.+?)\*\*:?$/);
+    if (heading || boldHeading) {
+      flush();
+      blocks.push(<h4 key={`heading-${blocks.length}`}>{heading ? heading[1] : boldHeading![1]}</h4>);
+      continue;
+    }
+    const bullet = trimmed.match(/^[-*•]\s+(.+)$/);
+    const numbered = trimmed.match(/^\d+[.)]\s+(.+)$/);
+    if (bullet || numbered) {
+      const ordered = Boolean(numbered);
+      if (table.length) flush();
+      if (!list || list.ordered !== ordered) {
+        flush();
+        list = { ordered, items: [] };
+      }
+      (list as { ordered: boolean; items: string[] }).items.push((bullet ?? numbered)![1]);
+      continue;
+    }
+    flush();
+    blocks.push(<p key={`paragraph-${blocks.length}`}>{highlightFigures(trimmed)}</p>);
+  }
+  flush();
+  return <div className="assistant-answer-body">{blocks}</div>;
 }
 
 function AssistantWorkspace({ item }: { item: NavigationItem }) {
@@ -636,10 +989,12 @@ function AssistantWorkspace({ item }: { item: NavigationItem }) {
           <div className="suggestion-list" aria-label="Example questions">{["What is the total sales?", "Which product has the highest revenue?", "Show sales by month"].map((prompt) => <button className="suggestion-chip" key={prompt} type="button" disabled={!dataset || asking} title={!dataset ? "Upload a dataset first" : undefined} onClick={() => setQuestion(prompt)}>{prompt}<ArrowRight aria-hidden="true" /></button>)}</div>
           <form onSubmit={submitQuestion}>
             <label className="assistant-composer-label" htmlFor="assistant-question">Your question</label>
-            <div className="assistant-composer"><textarea id="assistant-question" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder={dataset ? "Ask about the active dataset…" : "Upload a dataset to start asking questions"} disabled={!dataset || asking} rows={2} /><Button type="submit" disabled={!dataset || !question.trim() || asking}>{asking ? "Thinking…" : "Ask"}</Button></div>
+            <div className="assistant-composer"><textarea id="assistant-question" value={question} onChange={(event) => setQuestion(event.target.value)} placeholder={dataset ? "Ask about the active dataset…" : "Upload a dataset to start asking questions"} disabled={!dataset || asking} rows={4} maxLength={2000} /><Button type="submit" disabled={!dataset || !question.trim() || asking}>{asking ? "Thinking…" : "Ask"}</Button></div>
           </form>
           {error ? <p className="assistant-error" role="alert">{error}</p> : null}
-          {answer ? <div className="assistant-answer" role="status"><div><strong>Verified answer</strong>{answer.verified ? <Badge variant="secondary">Data-backed</Badge> : null}</div><p>{answer.text}</p>{answer.sources.length ? <ul>{answer.sources.map((source) => <li key={source}>{source}</li>)}</ul> : null}</div> : null}
+          {asking ? <div className="assistant-answer assistant-answer-loading" role="status" aria-live="polite"><span className="assistant-typing" aria-hidden="true"><i /><i /><i /></span><p>Analysing the active dataset…</p></div> : null}
+          {answer ? <div className="assistant-answer" role="status"><div><strong>Verified answer</strong>{answer.verified ? <Badge variant="secondary">Data-backed</Badge> : null}</div><StructuredAnswer text={answer.text} />{answer.sources.length ? <div className="assistant-sources"><h4>Evidence</h4><ul>{answer.sources.map((source) => <li key={source}>{source}</li>)}</ul></div> : null}</div> : null}
+          {!answer && !asking && dataset ? <p className="assistant-note">Ask a question above. Answers are computed from your active dataset and are never generated from placeholder values.</p> : null}
           {!dataset ? <p className="assistant-note"><LockKeyhole aria-hidden="true" /> Upload a dataset before sending questions.</p> : null}
         </CardContent></Card>
         <Card className="panel-card evidence-card"><CardHeader><CardTitle className="panel-title">Answer sources</CardTitle><p className="panel-subtitle">Evidence for generated responses.</p></CardHeader><CardContent><EmptyState icon={Search} title="Source records are available" description="Answers are computed from your active dataset. Document citations are part of the separate RAG workspace." action="Open RAG assistant" href="/rag-assistant" /></CardContent></Card>
@@ -648,9 +1003,10 @@ function AssistantWorkspace({ item }: { item: NavigationItem }) {
   );
 }
 
-type RAGDocument = { name: string; characters: number; chunks: number };
-type RAGSource = { doc_name: string; chunk_index: number; score: number; excerpt: string };
-type RAGResponse = { text: string; verified_retrieval: boolean; sources: RAGSource[]; note: string; used_llm: boolean };
+type RAGDocument = { name: string; characters: number; chunks: number; pages?: number | null; embedding?: string; doc_id?: string; status?: string };
+type RAGSource = { doc_name: string; chunk_index: number; score: number; excerpt: string; page?: number | null; chunk_id?: string; citation?: string };
+type RAGResponse = { text: string; verified_retrieval: boolean; sources: RAGSource[]; note: string; used_llm: boolean; generation?: { available: boolean; provider: string; model: string | null; message: string } };
+type RAGTurn = { question: string; answer: RAGResponse };
 
 function RagAssistantPage({ item }: { item: NavigationItem }) {
   const { data, error: loadError, isLoading, mutate } = useSWR<{ documents: RAGDocument[]; storage: string }>("/api/retailmind/ai/rag/documents", fetchJson);
@@ -661,6 +1017,8 @@ function RagAssistantPage({ item }: { item: NavigationItem }) {
   const [asking, setAsking] = useState(false);
   const [actionError, setActionError] = useState("");
   const [notice, setNotice] = useState("");
+  const [turns, setTurns] = useState<RAGTurn[]>([]);
+  const [reindexing, setReindexing] = useState("");
 
   async function uploadDocument(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -681,6 +1039,23 @@ function RagAssistantPage({ item }: { item: NavigationItem }) {
       setActionError(reason instanceof Error ? reason.message : "The document could not be indexed.");
     } finally {
       setUploading(false);
+    }
+  }
+
+  async function reindexDocument(name: string) {
+    setActionError("");
+    setNotice("");
+    setReindexing(name);
+    try {
+      const response = await fetch(`/api/retailmind/ai/rag/documents/${encodeURIComponent(name)}/reindex`, { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "The document could not be re-indexed.");
+      await mutate();
+      setNotice(`${name} was re-indexed with ${payload.chunks} chunks using ${payload.embedding} embeddings.`);
+    } catch (reason) {
+      setActionError(reason instanceof Error ? reason.message : "The document could not be re-indexed.");
+    } finally {
+      setReindexing("");
     }
   }
 
@@ -708,11 +1083,19 @@ function RagAssistantPage({ item }: { item: NavigationItem }) {
       const response = await fetch("/api/retailmind/ai/rag", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ question: question.trim() }),
+        body: JSON.stringify({
+          question: question.trim(),
+          history: turns.flatMap((turn) => [
+            { role: "user", content: turn.question },
+            { role: "assistant", content: turn.answer.text },
+          ]),
+        }),
       });
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.detail || "The retrieval assistant could not answer.");
-      setAnswer(payload as RAGResponse);
+      const responsePayload = payload as RAGResponse;
+      setAnswer(responsePayload);
+      setTurns((current) => [...current, { question: question.trim(), answer: responsePayload }]);
     } catch (reason) {
       setActionError(reason instanceof Error ? reason.message : "The retrieval assistant could not answer.");
     } finally {
@@ -736,7 +1119,9 @@ function RagAssistantPage({ item }: { item: NavigationItem }) {
             {actionError ? <p className="assistant-error" role="alert">{actionError}</p> : null}
             {notice ? <p className="upload-message" role="status">{notice}</p> : null}
             {isLoading ? <div className="loading-panel" aria-label="Loading document index" /> : null}
-            {answer ? <div className="rag-answer" role="status"><div className="rag-answer-heading"><strong>Retrieved answer</strong><Badge variant="secondary">{answer.verified_retrieval ? "Source-backed" : "Unverified"}</Badge></div><p>{answer.text}</p><small>{answer.note}</small>{answer.sources.length ? <div className="rag-sources"><h3>Sources</h3>{answer.sources.map((source) => <article key={`${source.doc_name}-${source.chunk_index}`}><strong>{source.doc_name} · chunk {source.chunk_index + 1}</strong><span>Relevance {source.score.toFixed(2)}</span><p>{source.excerpt}</p></article>)}</div> : null}</div> : null}
+            {asking ? <div className="rag-answer" role="status" aria-live="polite"><p>Searching the indexed documents and preparing a grounded answer…</p></div> : null}
+            {answer ? <div className="rag-answer" role="status"><div className="rag-answer-heading"><strong>Answer</strong><Badge variant="secondary">{answer.sources.length ? "Source-backed" : "No supporting evidence"}</Badge><Badge variant="outline">{answer.used_llm ? "LLM grounded in sources" : "Extractive · no LLM configured"}</Badge></div><StructuredAnswer text={answer.text} /><small>{answer.note}</small>{answer.generation ? <small>{answer.generation.message}</small> : null}{answer.sources.length ? <div className="rag-sources"><h3>Sources</h3>{answer.sources.map((source) => <article key={source.chunk_id ?? `${source.doc_name}-${source.chunk_index}`}><strong>{source.doc_name}{source.page ? ` · page ${source.page}` : ""} · chunk {source.chunk_index + 1}</strong><span>Relevance {source.score.toFixed(2)}</span><p>{source.excerpt}</p></article>)}</div> : null}</div> : null}
+            {turns.length > 1 ? <div className="rag-conversation" aria-label="Conversation history"><h3 className="rag-conversation-title">Conversation</h3>{turns.slice(0, -1).map((turn, index) => <div className="rag-turn" key={index}><strong>You asked</strong><p>{turn.question}</p><strong>Answer</strong><p>{turn.answer.text.slice(0, 600)}{turn.answer.text.length > 600 ? "…" : ""}</p></div>)}</div> : null}
           </CardContent>
         </Card>
         <Card className="panel-card rag-documents-card">
@@ -744,13 +1129,13 @@ function RagAssistantPage({ item }: { item: NavigationItem }) {
           <CardContent>
             <form className="rag-upload-form" onSubmit={uploadDocument}>
               <label htmlFor="rag-file">Add a document</label>
-              <input id="rag-file" type="file" accept=".txt,.md,.csv,.json,.pdf,.docx" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
+              <input id="rag-file" type="file" accept=".txt,.md,.csv,.json,.pdf,.docx,.xlsx,.xls,.xlsm" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
               <Button type="submit" variant="outline" size="sm" disabled={!file || uploading}>{uploading ? "Indexing…" : "Index document"}</Button>
             </form>
             <div className="rag-document-list" aria-live="polite">
-              {data?.documents.length ? data.documents.map((document) => <div className="rag-document-row" key={document.name}><span className="file-type-icon"><FileText aria-hidden="true" /></span><div><strong>{document.name}</strong><span>{document.chunks} chunks · {document.characters.toLocaleString()} characters</span></div><Button variant="ghost" size="sm" aria-label={`Remove ${document.name}`} onClick={() => removeDocument(document.name)}>Remove</Button></div>) : !isLoading ? <EmptyState icon={FileText} title="No documents indexed" description="Add a text, spreadsheet, JSON, PDF, or DOCX file to create a private retrieval index." /> : null}
+              {data?.documents.length ? data.documents.map((document) => <div className="rag-document-row" key={document.name}><span className="file-type-icon"><FileText aria-hidden="true" /></span><div><strong>{document.name}</strong><span>{document.chunks} chunks · {document.characters.toLocaleString()} characters{document.pages ? ` · ${document.pages} pages` : ""} · {document.embedding ?? "local"} embeddings{document.status ? ` · ${document.status}` : ""}</span></div><div className="rag-document-actions"><Button variant="ghost" size="sm" disabled={reindexing === document.name} aria-label={`Re-index ${document.name}`} onClick={() => reindexDocument(document.name)}>{reindexing === document.name ? "Re-indexing…" : "Re-index"}</Button><Button variant="ghost" size="sm" aria-label={`Remove ${document.name}`} onClick={() => removeDocument(document.name)}>Remove</Button></div></div>) : !isLoading ? <EmptyState icon={FileText} title="No documents indexed" description="Add a text, spreadsheet, JSON, PDF, DOCX, or Excel file to create a private retrieval index." /> : null}
             </div>
-            <p className="rag-storage-note"><ShieldCheck aria-hidden="true" /> This mirrors the existing Streamlit session-scoped RAG store. The index clears when the Python service restarts.</p>
+            <p className="rag-storage-note"><ShieldCheck aria-hidden="true" /> The index and document metadata are persisted per account and reloaded automatically after the Python service restarts. Documents are visible only to the signed-in owner.</p>
           </CardContent>
         </Card>
       </div>
@@ -764,6 +1149,11 @@ function IntelligencePage({ item }: { item: NavigationItem }) {
   const isSegmentation = item.href === "/customer-segmentation" || item.href === "/customer-tagging";
   const isCustomerTagging = item.href === "/customer-tagging";
   const [customerPage, setCustomerPage] = useState({ datasetId: "", offset: 0 });
+  const [clusterChoice, setClusterChoice] = useState<"auto" | number>("auto");
+  const [tagSearch, setTagSearch] = useState("");
+  const [tagFilter, setTagFilter] = useState("all");
+  const [clusterFilter, setClusterFilter] = useState("all");
+  const [tagSort, setTagSort] = useState<"monetary" | "recency" | "frequency" | "customer">("monetary");
   const customerOffset = customerPage.datasetId === dataset?.id ? customerPage.offset : 0;
   function setCustomerOffset(nextOffset: number | ((currentOffset: number) => number)) {
     const currentOffset = customerPage.datasetId === dataset?.id ? customerPage.offset : 0;
@@ -772,14 +1162,95 @@ function IntelligencePage({ item }: { item: NavigationItem }) {
       offset: typeof nextOffset === "function" ? nextOffset(currentOffset) : nextOffset,
     });
   }
-  const segmentationQuery = isCustomerTagging ? `?offset=${customerOffset}&limit=100` : "";
+  const segmentationParams = new URLSearchParams();
+  if (isCustomerTagging) {
+    segmentationParams.set("offset", String(customerOffset));
+    segmentationParams.set("limit", "100");
+    segmentationParams.set("sort", tagSort);
+    if (tagFilter !== "all") segmentationParams.set("tag", tagFilter);
+    if (clusterFilter !== "all") segmentationParams.set("cluster", clusterFilter);
+    if (tagSearch.trim()) segmentationParams.set("search", tagSearch.trim());
+  } else if (isSegmentation && clusterChoice !== "auto") {
+    segmentationParams.set("clusters", String(clusterChoice));
+  }
+  const segmentationQuery = isSegmentation && segmentationParams.toString() ? `?${segmentationParams.toString()}` : "";
   const endpoint = !dataset || item.href === "/assistant" || isRag ? null
     : isSegmentation ? `/api/retailmind/segmentation/${encodeURIComponent(dataset.id)}${segmentationQuery}`
       : item.href === "/smart-alerts" ? `/api/retailmind/ai/alerts/${encodeURIComponent(dataset.id)}`
         : `/api/retailmind/ai/insights/${encodeURIComponent(dataset.id)}`;
-  const { data, error, isLoading } = useSWR<IntelligenceResult>(endpoint, fetchJson);
+  const { data, error, isLoading, mutate } = useSWR<IntelligenceResult>(endpoint, fetchJson);
   const [alertSeverity, setAlertSeverity] = useState("all");
   const [alertStatus, setAlertStatus] = useState("all");
+  const [alertActionError, setAlertActionError] = useState("");
+  const [alertActionPending, setAlertActionPending] = useState("");
+  const [prefSaving, setPrefSaving] = useState(false);
+  const [emailTestPending, setEmailTestPending] = useState(false);
+  const [emailTestResult, setEmailTestResult] = useState("");
+  const { data: alertPreferences, mutate: mutateAlertPreferences } = useSWR<AlertPreferences>(
+    item.href === "/smart-alerts" ? "/api/retailmind/ai/alerts/preferences" : null,
+    fetchJson,
+  );
+
+  async function saveAlertPreferences(enabled: boolean, minSeverity: "critical" | "warning" | "info", frequency: "instant" | "daily") {
+    if (prefSaving) return;
+    setPrefSaving(true);
+    setAlertActionError("");
+    try {
+      const response = await fetch("/api/retailmind/ai/alerts/preferences", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled, min_severity: minSeverity, frequency }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "Notification preferences could not be saved.");
+      await mutateAlertPreferences();
+    } catch (reason) {
+      setAlertActionError(reason instanceof Error ? reason.message : "Notification preferences could not be saved.");
+    } finally {
+      setPrefSaving(false);
+    }
+  }
+
+  async function sendTestEmail() {
+    if (emailTestPending) return;
+    setEmailTestPending(true);
+    setEmailTestResult("");
+    setAlertActionError("");
+    try {
+      const response = await fetch("/api/retailmind/ai/alerts/email/test", { method: "POST" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "The test email could not be requested.");
+      setEmailTestResult(
+        payload.status === "accepted_by_smtp"
+          ? "Test email accepted by SMTP. Check the signed-in account inbox."
+          : `Test email not sent: ${String(payload.status).replaceAll("_", " ")}${payload.missing?.length ? ` (missing ${payload.missing.join(", ")})` : ""}.`,
+      );
+    } catch (reason) {
+      setAlertActionError(reason instanceof Error ? reason.message : "The test email could not be requested.");
+    } finally {
+      setEmailTestPending(false);
+    }
+  }
+
+  async function updateAlert(alertId: string, action: "acknowledge" | "dismiss" | "resolve" | "reopen") {
+    if (!dataset || alertActionPending) return;
+    setAlertActionError("");
+    setAlertActionPending(alertId);
+    try {
+      const response = await fetch(`/api/retailmind/ai/alerts/${encodeURIComponent(dataset.id)}/${encodeURIComponent(alertId)}/status`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "The alert status could not be saved.");
+      await mutate();
+    } catch (reason) {
+      setAlertActionError(reason instanceof Error ? reason.message : "The alert status could not be saved.");
+    } finally {
+      setAlertActionPending("");
+    }
+  }
   const filteredAlerts = (data?.alerts ?? []).filter((alert) =>
     (alertSeverity === "all" || alert.severity === alertSeverity)
     && (alertStatus === "all" || alert.status === alertStatus)
@@ -791,19 +1262,116 @@ function IntelligencePage({ item }: { item: NavigationItem }) {
   const list = isSegmentation ? (isCustomerTagging ? data?.customers ?? [] : data?.summary ?? []) : [];
   const fields = list.length ? Object.keys(list[0]) : [];
   const customerTotal = data?.customer_total ?? list.length;
+  const topSegment = isSegmentation && !isCustomerTagging ? String(list[0]?.segment ?? "—") : "";
+  const churnRiskCustomers = isSegmentation && !isCustomerTagging
+    ? list.reduce((sum, row) => sum + (typeof row.rule_based_risk_customers === "number" ? row.rule_based_risk_customers : 0), 0)
+    : 0;
+  const silhouette = typeof data?.silhouette === "number" ? data.silhouette : null;
   const hasPreviousCustomerPage = customerOffset > 0;
   const hasNextCustomerPage = customerOffset + list.length < customerTotal;
+
+  function formatSummaryCell(field: string, value: string | number | boolean | null) {
+    if (value == null) return "—";
+    if (["revenue", "avg_monetary_value", "avg_purchase_value"].includes(field)) return formatCurrencyPrecise(Number(value));
+    if (["customer_share", "revenue_share"].includes(field)) return formatPercent(Number(value) * 100);
+    if (["avg_frequency", "avg_recency_days"].includes(field)) return formatNumber(Number(value), field === "avg_frequency" ? 2 : 0);
+    if (typeof value === "number") return formatNumber(value, 2);
+    return String(value);
+  }
   return (
     <div className="page-stack">
       <PageHeading item={item} />
-      {item.href === "/smart-alerts" && data?.alerts ? <div className="alert-filter-toolbar" aria-label="Filter smart alerts"><label className="compact-field"><span>Severity</span><select value={alertSeverity} onChange={(event) => setAlertSeverity(event.target.value)}><option value="all">All severities</option><option value="critical">Critical</option><option value="warning">Warning</option><option value="info">Info</option></select></label><label className="compact-field"><span>Status</span><select value={alertStatus} onChange={(event) => setAlertStatus(event.target.value)}><option value="all">All statuses</option><option value="new">New</option><option value="acknowledged">Acknowledged</option><option value="dismissed">Dismissed</option></select></label><Button type="button" variant="outline" size="sm" disabled={!filteredAlerts.length} onClick={() => downloadRowsAsCsv("smart-alerts.csv", filteredAlerts.map(({ evidence, ...alert }) => ({ ...alert, evidence: evidence ? JSON.stringify(evidence) : "" })))}>Export filtered CSV</Button></div> : null}
-      {item.href === "/smart-alerts" ? <div className="backend-notice" role="status"><CircleAlert aria-hidden="true" /><span>Severity and status filters and CSV export are available. Acknowledge and dismiss are unavailable until alert state has approved persistent storage; generated alerts remain new on refresh.</span></div> : null}
+      {isSegmentation && !isCustomerTagging ? (
+        <div className="segmentation-toolbar" aria-label="Segmentation configuration">
+          <label className="compact-field">
+            <span>Number of segments</span>
+            <select
+              value={clusterChoice}
+              onChange={(event) => setClusterChoice(event.target.value === "auto" ? "auto" : Number(event.target.value))}
+              disabled={!dataset}
+            >
+              <option value="auto">Auto (best silhouette)</option>
+              {[2, 3, 4, 5, 6, 7, 8].map((count) => <option key={count} value={count}>{count} segments</option>)}
+            </select>
+          </label>
+          <span className="filter-note">
+            {data?.cluster_count ? `K-Means k=${data.cluster_count}` : "Choose a dataset to calculate segments"}
+            {typeof data?.silhouette === "number" ? ` · silhouette ${data.silhouette.toFixed(3)}` : ""}
+          </span>
+        </div>
+      ) : null}
+      {data?.available && isSegmentation && !isCustomerTagging && list.length ? (
+        <section className="metric-grid" aria-label="Segmentation metrics">
+          <div className="metric-card"><div className="metric-content"><span className="metric-label">Total customers</span><span className="metric-value">{customerTotal.toLocaleString("en-IN")}</span><span className="metric-footnote">Distinct customer identifiers</span></div></div>
+          <div className="metric-card"><div className="metric-content"><span className="metric-label">Total segments</span><span className="metric-value">{data?.cluster_count ?? "—"}</span><span className="metric-footnote">{silhouette != null ? `Silhouette ${silhouette.toFixed(3)}` : "Cluster separation unavailable"}</span></div></div>
+          <div className="metric-card"><div className="metric-content"><span className="metric-label">VIP customers</span><span className="metric-value">{(data?.tags?.VIP ?? 0).toLocaleString("en-IN")}</span><span className="metric-footnote">High value, frequent, recent</span></div></div>
+          <div className="metric-card"><div className="metric-content"><span className="metric-label">Rule-based churn risk</span><span className="metric-value">{churnRiskCustomers.toLocaleString("en-IN")}</span><span className="metric-footnote">Transparent recency/frequency rule</span></div></div>
+          <div className="metric-card"><div className="metric-content"><span className="metric-label">Top segment by revenue</span><span className="metric-value segmentation-metric-text">{topSegment}</span><span className="metric-footnote">Highest revenue share</span></div></div>
+        </section>
+      ) : null}
+      {isSegmentation && !isCustomerTagging && data?.summary?.length ? (
+        <Card className="panel-card">
+          <CardHeader><CardTitle className="panel-title">Segment distribution and revenue share</CardTitle><p className="panel-subtitle">Each bar is calculated from the full customer result; percentages reflect the active dataset.</p></CardHeader>
+          <CardContent><div className="segment-mix">
+            {data.summary.map((row) => {
+              const segment = String(row.segment ?? "Segment");
+              const customerShare = Number(row.customer_share ?? 0) * 100;
+              const revenueShare = Number(row.revenue_share ?? 0) * 100;
+              return <article className="segment-mix-row" key={segment}>
+                <div className="segment-mix-head"><strong>{segment}</strong><span>{formatNumber(Number(row.customers ?? 0), 0)} customers · {formatPercent(revenueShare)} of revenue</span></div>
+                <div className="segment-bar" role="img" aria-label={`${segment}: ${formatPercent(customerShare)} of customers and ${formatPercent(revenueShare)} of revenue`}>
+                  <span className="segment-bar-customers" style={{ width: `${Math.max(1, Math.min(100, customerShare))}%` }} />
+                  <span className="segment-bar-revenue" style={{ width: `${Math.max(1, Math.min(100, revenueShare))}%` }} />
+                </div>
+                <p>{SEGMENT_GUIDANCE[segment] ?? "Compare this group's revenue and recency before choosing a retention action."}</p>
+              </article>;
+            })}
+          </div><div className="segment-legend"><span><i className="segment-key-customers" /> Customer share</span><span><i className="segment-key-revenue" /> Revenue share</span></div></CardContent>
+        </Card>
+      ) : null}
+      {isCustomerTagging && data?.available && data.tags ? (
+        <section className="metric-grid" aria-label="Customer tag metrics">
+          <div className="metric-card"><div className="metric-content"><span className="metric-label">Total customers</span><span className="metric-value">{(data.tag_total ?? customerTotal).toLocaleString("en-IN")}</span><span className="metric-footnote">Distinct customers with valid RFM</span></div></div>
+          <div className="metric-card"><div className="metric-content"><span className="metric-label">VIP customers</span><span className="metric-value">{(data.tags.VIP ?? 0).toLocaleString("en-IN")}</span><span className="metric-footnote">High value, frequent, recent</span></div></div>
+          <div className="metric-card"><div className="metric-content"><span className="metric-label">Loyal customers</span><span className="metric-value">{(data.tags.Loyal ?? 0).toLocaleString("en-IN")}</span><span className="metric-footnote">Repeat purchase behaviour</span></div></div>
+          <div className="metric-card"><div className="metric-content"><span className="metric-label">At-risk customers</span><span className="metric-value">{(data.tags["At Risk"] ?? 0).toLocaleString("en-IN")}</span><span className="metric-footnote">High value but inactive</span></div></div>
+          <div className="metric-card"><div className="metric-content"><span className="metric-label">New customers</span><span className="metric-value">{(data.tags.New ?? 0).toLocaleString("en-IN")}</span><span className="metric-footnote">Recent first purchase</span></div></div>
+        </section>
+      ) : null}
+      {isCustomerTagging && data?.tags ? (
+        <Card className="panel-card compact-panel">
+          <CardHeader><CardTitle className="panel-title">Tag distribution</CardTitle><p className="panel-subtitle">Behaviour-based tags calculated from the full RFM result.</p></CardHeader>
+          <CardContent><div className="segment-mix">
+            {Object.entries(data.tags).sort(([, left], [, right]) => right - left).map(([tag, count]) => {
+              const total = data.tag_total || Object.values(data.tags ?? {}).reduce((sum, value) => sum + value, 0);
+              const share = total ? (count / total) * 100 : 0;
+              return <article className="tag-mix-row" key={tag}><TagBadge tag={tag} /><div className="segment-bar"><span className={`segment-bar-tag ${TAG_CLASSES[tag] ?? "tag-regular"}`} style={{ width: `${Math.max(2, share)}%` }} /></div><span className="tag-mix-count">{count.toLocaleString("en-IN")} · {formatPercent(share)}</span></article>;
+            })}
+          </div></CardContent>
+        </Card>
+      ) : null}
+      {item.href === "/smart-alerts" && data?.alerts ? <div className="alert-filter-toolbar" aria-label="Filter smart alerts"><label className="compact-field"><span>Severity</span><select value={alertSeverity} onChange={(event) => setAlertSeverity(event.target.value)}><option value="all">All severities</option><option value="critical">Critical</option><option value="warning">Warning</option><option value="info">Info</option></select></label><label className="compact-field"><span>Status</span><select value={alertStatus} onChange={(event) => setAlertStatus(event.target.value)}><option value="all">All statuses</option><option value="new">New</option><option value="acknowledged">Acknowledged</option><option value="resolved">Resolved</option><option value="dismissed">Dismissed</option></select></label><Button type="button" variant="outline" size="sm" disabled={!filteredAlerts.length} onClick={() => downloadRowsAsCsv("smart-alerts.csv", filteredAlerts.map(({ evidence, ...alert }) => ({ ...alert, evidence: evidence ? JSON.stringify(evidence) : "" })))}>Export filtered CSV</Button></div> : null}
+      {item.href === "/smart-alerts" && data?.email ? (
+        <div className="alert-email-status" role="status">
+          <strong>Email notifications</strong>
+          <label className="alert-pref-toggle"><input type="checkbox" checked={alertPreferences?.enabled ?? false} disabled={prefSaving} onChange={(event) => saveAlertPreferences(event.target.checked, alertPreferences?.min_severity ?? "warning", alertPreferences?.frequency ?? "instant")} /> Email new alerts</label>
+          <label className="alert-pref-toggle">Minimum severity <select value={alertPreferences?.min_severity ?? "warning"} disabled={prefSaving} onChange={(event) => saveAlertPreferences(alertPreferences?.enabled ?? false, event.target.value as "critical" | "warning" | "info", alertPreferences?.frequency ?? "instant")}><option value="critical">Critical</option><option value="warning">High</option><option value="info">Medium</option></select></label>
+          <label className="alert-pref-toggle">Frequency <select value={alertPreferences?.frequency ?? "instant"} disabled={prefSaving} onChange={(event) => saveAlertPreferences(alertPreferences?.enabled ?? false, alertPreferences?.min_severity ?? "warning", event.target.value as "instant" | "daily")}><option value="instant">Each alert</option><option value="daily">Daily digest</option></select></label>
+          <span>{alertPreferences?.configured ? `SMTP ready · ${alertPreferences.recipient_count} recipient(s) · ${alertPreferences.frequency === "daily" ? "daily digest on the first check each day" : "one email per alert"} · up to 3 attempts.` : alertPreferences?.smtp_ready ? "SMTP is ready but email notifications are switched off for this account." : "SMTP is not configured on the server, so enabling this will not deliver mail."}</span>
+          {alertPreferences?.missing?.length ? <span>Missing: {alertPreferences.missing.join(", ")}</span> : null}
+          <Button type="button" variant="outline" size="sm" disabled={emailTestPending || !alertPreferences?.smtp_ready} onClick={sendTestEmail}>{emailTestPending ? "Sending test…" : "Send test email"}</Button>
+          {emailTestResult ? <span role="status">{emailTestResult}</span> : null}
+          {data.email.sent?.length ? <span>{data.email.sent.length} new alert email(s) accepted by SMTP.</span> : null}
+          {data.email.failed?.length ? <span>{data.email.failed.length} email attempt(s) failed and will retry on the next check (max 3).</span> : null}
+        </div>
+      ) : null}
+      {alertActionError ? <p className="assistant-error" role="alert">{alertActionError}</p> : null}
       {!dataset ? <EmptyState icon={Database} title="Choose a dataset to begin" description="Upload a CSV or Excel file to calculate this view from your data." action="Upload a dataset" /> : null}
       {isLoading ? <div className="loading-panel" aria-live="polite" /> : null}
       {error ? <p className="assistant-error" role="alert">{error.message}</p> : null}
       {data && !data.available ? <div className="backend-notice" role="status"><CircleAlert aria-hidden="true" /><span>{data.notes?.join(" ") || "This feature is unavailable for the uploaded dataset."}</span></div> : null}
-      {data?.insights?.length ? <div className="insight-card"><CardHeader><CardTitle className="panel-title">Verified business insights</CardTitle><p className="panel-subtitle">Generated by the existing rule-based analytics engine.</p></CardHeader><CardContent><div className="ranked-list">{data.insights.map((insight) => <p className="insight-copy" key={insight}>{insight}</p>)}</div></CardContent></div> : null}
-      {item.href === "/smart-alerts" && filteredAlerts.length ? <div className="info-grid alert-card-grid">{filteredAlerts.map((alert, index) => <Card className="panel-card" key={alert.id ?? `${alert.metric}-${index}`}><CardHeader><div className="alert-card-heading"><CardTitle className="panel-title">{alert.title}</CardTitle><div className="alert-badges"><Badge variant={alert.severity === "critical" ? "destructive" : "outline"}>{alert.severity}</Badge><Badge variant="secondary">{alert.status ?? "new"}</Badge></div></div><p className="panel-subtitle">{alert.description}</p></CardHeader><CardContent><p className="empty-copy">{alert.suggestion}</p><div className="alert-evidence"><span>{alert.scope ?? "Overall"}</span><span>{alert.comparison_period || "Comparison period unavailable"}</span></div>{alert.current_value != null || alert.previous_value != null ? <p className="alert-values">Current {alert.current_value?.toLocaleString("en-IN") ?? "—"} · Previous {alert.previous_value?.toLocaleString("en-IN") ?? "—"}{alert.pct_change != null ? ` · ${(alert.pct_change * 100).toFixed(1)}%` : ""}</p> : null}</CardContent></Card>)}</div> : null}
+      {data?.insights?.length ? <section className="insight-card-grid" aria-label="Business insights">{data.insights.map((insight, index) => <article className="insight-tile" key={insight}><span className="insight-tile-index">{String(index + 1).padStart(2, "0")}</span><div><h3>{/risk|declin|below-median|drop|loss|negative|underperform/i.test(insight) ? "Risk" : /\bopportunit|\bincrease|\bgrow|\bbest\b|\btop\b/i.test(insight) ? "Opportunity" : "Observation"}</h3><p>{insight}</p></div></article>)}</section> : null}
+      {item.href === "/smart-alerts" && filteredAlerts.length ? <div className="info-grid alert-card-grid">{filteredAlerts.map((alert, index) => <Card className="panel-card" id={alert.id ? `alert-${alert.id}` : undefined} key={alert.id ?? `${alert.metric}-${index}`}><CardHeader><div className="alert-card-heading"><CardTitle className="panel-title">{alert.title}</CardTitle><div className="alert-badges"><Badge variant={alert.severity === "critical" ? "destructive" : "outline"}>{alert.severity_label ?? alert.severity}</Badge><Badge variant="secondary">{alert.status ?? "new"}</Badge></div></div><p className="panel-subtitle">{alert.description}</p></CardHeader><CardContent><p className="empty-copy">{alert.suggestion}</p><div className="alert-evidence"><span>{alert.scope_label ?? alert.scope ?? "Overall"}{alert.scope_dimension ? ` · ${alert.scope_dimension}` : ""}</span><span>{alert.comparison_period || "Comparison period unavailable"}</span></div>{alert.current_value != null || alert.previous_value != null ? <p className="alert-values">Current {alert.current_value?.toLocaleString("en-IN") ?? "—"} · Previous {alert.previous_value?.toLocaleString("en-IN") ?? "—"}{alert.pct_change != null ? ` · ${(alert.pct_change * 100).toFixed(1)}%` : ""}</p> : null}{alert.acknowledged_at ? <p className="alert-values">Updated {new Date(alert.acknowledged_at).toLocaleString()}</p> : null}<div className="alert-actions"><Button type="button" size="sm" variant="outline" disabled={alertActionPending === alert.id || alert.status === "acknowledged"} onClick={() => alert.id && updateAlert(alert.id, "acknowledge")}>{alertActionPending === alert.id ? "Saving…" : "Acknowledge"}</Button><Button type="button" size="sm" variant="outline" disabled={alertActionPending === alert.id || alert.status === "resolved"} onClick={() => alert.id && updateAlert(alert.id, "resolve")}>Resolve</Button><Button type="button" size="sm" variant="ghost" disabled={alertActionPending === alert.id || alert.status === "dismissed"} onClick={() => alert.id && updateAlert(alert.id, "dismiss")}>Dismiss</Button>{alert.status !== "new" ? <Button type="button" size="sm" variant="ghost" disabled={alertActionPending === alert.id} onClick={() => alert.id && updateAlert(alert.id, "reopen")}>Reopen</Button> : null}</div></CardContent></Card>)}</div> : null}
       {item.href === "/smart-alerts" && data?.alerts?.length && !filteredAlerts.length ? <div className="alert-empty-filter"><p>No alerts match the selected filters.</p><Button type="button" variant="outline" size="sm" onClick={() => { setAlertSeverity("all"); setAlertStatus("all"); }}>Clear filters</Button></div> : null}
       {data?.available && isSegmentation && list.length ? (
         <Card className="panel-card">
@@ -818,16 +1386,45 @@ function IntelligencePage({ item }: { item: NavigationItem }) {
             </div>
           </CardHeader>
           <CardContent>
-            <div className="table-wrap"><Table><TableHeader><TableRow>{fields.map((field) => <TableHead key={field}>{field.replaceAll("_", " ")}</TableHead>)}</TableRow></TableHeader><TableBody>{list.map((row, index) => <TableRow key={String(row[fields[0]]) + index}>{fields.map((field) => <TableCell key={field}>{String(row[field] ?? "—")}</TableCell>)}</TableRow>)}</TableBody></Table></div>
             {isCustomerTagging ? (
-              <div className="segmentation-pagination" aria-label="Customer tag pages">
-                <span>Showing {customerTotal ? customerOffset + 1 : 0}–{Math.min(customerOffset + list.length, customerTotal)} of {customerTotal.toLocaleString()} customers. Exports include the full result.</span>
-                <div>
-                  <Button type="button" variant="outline" size="sm" disabled={!hasPreviousCustomerPage} onClick={() => setCustomerOffset((offset) => Math.max(0, offset - 100))}>Previous</Button>
-                  <Button type="button" variant="outline" size="sm" disabled={!hasNextCustomerPage} onClick={() => setCustomerOffset((offset) => offset + 100)}>Next</Button>
+              <>
+                <div className="tag-toolbar">
+                  <label className="compact-field"><span><Search aria-hidden="true" /> Search customer</span><input value={tagSearch} onChange={(event) => { setTagSearch(event.target.value); setCustomerOffset(0); }} placeholder="Customer ID" /></label>
+                  <label className="compact-field"><span>Tag</span><select value={tagFilter} onChange={(event) => { setTagFilter(event.target.value); setCustomerOffset(0); }}><option value="all">All tags</option>{["VIP", "Loyal", "New", "Regular", "At Risk", "Lost"].map((tag) => <option key={tag} value={tag}>{tag}</option>)}</select></label>
+                  <label className="compact-field"><span>Cluster</span><select value={clusterFilter} onChange={(event) => { setClusterFilter(event.target.value); setCustomerOffset(0); }}><option value="all">All clusters</option>{Array.from({ length: Math.max(1, data?.cluster_count ?? 1) }, (_, index) => <option key={index} value={index}>Cluster {index + 1}</option>)}</select></label>
+                  <label className="compact-field"><span>Sort by</span><select value={tagSort} onChange={(event) => { setTagSort(event.target.value as typeof tagSort); setCustomerOffset(0); }}><option value="monetary">Monetary value</option><option value="recency">Most recent</option><option value="frequency">Most frequent</option><option value="customer">Customer ID</option></select></label>
                 </div>
-              </div>
-            ) : null}
+                <div className="table-wrap">
+                  <table className="visual-table">
+                    <thead><tr><th>Customer</th><th>Tag</th><th>Segment</th><th>Cluster</th><th className="text-right">Recency (days)</th><th className="text-right">Frequency</th><th className="text-right">Monetary value</th><th>Last purchase</th></tr></thead>
+                    <tbody>
+                      {list.map((row, index) => (
+                        <tr key={String(row.customer_id) + index}>
+                          <td>{String(row.customer_id ?? "—")}</td>
+                          <td>{typeof row.customer_tag === "string" ? <TagBadge tag={row.customer_tag} /> : "—"}</td>
+                          <td>{String(row.segment ?? "—")}</td>
+                          <td><span className="tag-badge tag-cluster">{String(row.cluster_label ?? `Cluster ${Number(row.cluster ?? 0) + 1}`)}</span></td>
+                          <td className="text-right">{formatNumber(Number(row.recency_days ?? 0), 0)}</td>
+                          <td className="text-right">{formatNumber(Number(row.frequency ?? 0), 0)}</td>
+                          <td className="text-right">{formatCurrencyPrecise(Number(row.monetary_value ?? 0))}</td>
+                          <td>{formatDate(String(row.last_purchase ?? ""))}</td>
+                        </tr>
+                      ))}
+                      {!list.length ? <tr><td colSpan={8} className="table-empty">No customers match the selected tags, cluster or search.</td></tr> : null}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="segmentation-pagination" aria-label="Customer tag pages">
+                  <span>Showing {customerTotal ? customerOffset + 1 : 0}–{Math.min(customerOffset + list.length, customerTotal)} of {customerTotal.toLocaleString()} customers. Exports include the full result.</span>
+                  <div>
+                    <Button type="button" variant="outline" size="sm" disabled={!hasPreviousCustomerPage} onClick={() => setCustomerOffset((offset) => Math.max(0, offset - 100))}>Previous</Button>
+                    <Button type="button" variant="outline" size="sm" disabled={!hasNextCustomerPage} onClick={() => setCustomerOffset((offset) => offset + 100)}>Next</Button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="table-wrap"><Table><TableHeader><TableRow>{fields.map((field) => <TableHead key={field}>{field.replaceAll("_", " ")}</TableHead>)}</TableRow></TableHeader><TableBody>{list.map((row, index) => <TableRow key={String(row[fields[0]]) + index}>{fields.map((field) => <TableCell key={field}>{formatSummaryCell(field, row[field])}</TableCell>)}</TableRow>)}</TableBody></Table></div>
+            )}
           </CardContent>
         </Card>
       ) : null}
@@ -848,7 +1445,7 @@ type ForecastResponse = {
 
 function ForecastPage({ item }: { item: NavigationItem }) {
   const { dataset } = useDataset();
-  const reducedMotion = useReducedMotion();
+  const { isAnimationActive, animationDuration, animationEasing } = useChartAnimation();
   const metricRole = item.href === "/profit-forecasting" ? "profit" : "revenue";
   const [frequency, setFrequency] = useState("Monthly");
   const [periods, setPeriods] = useState(6);
@@ -907,7 +1504,7 @@ function ForecastPage({ item }: { item: NavigationItem }) {
       </div>
       {!dataset ? <EmptyState icon={Database} title="Choose a dataset to begin" description="The existing forecasting engine needs historical dates and the selected measure." action="Upload a dataset" /> : null}
       {error ? <p className="assistant-error" role="alert">{error}</p> : null}
-      {result?.available ? <Card className="panel-card"><CardHeader className="panel-header"><div><CardTitle className="panel-title">Observed history and forecast</CardTitle><p className="panel-subtitle">Solid line is actual data; dashed lines show forecast and approximate interval bounds.</p></div><Button type="button" variant="outline" size="sm" onClick={() => downloadRowsAsCsv("forecast-results.csv", forecastExportRows)}>Download CSV</Button></CardHeader><CardContent><ChartContainer config={forecastChartConfig} className="forecast-chart"><LineChart accessibilityLayer data={forecastChartData} margin={{ left: 4, right: 12, top: 12, bottom: 0 }}><CartesianGrid vertical={false} strokeDasharray="3 3" /><XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={8} minTickGap={24} tickFormatter={(value) => new Date(String(value)).toLocaleDateString("en-IN", { month: "short", year: "2-digit" })} /><YAxis width={48} tickLine={false} axisLine={false} tickFormatter={(value) => new Intl.NumberFormat("en-IN", { notation: "compact", maximumFractionDigits: 1 }).format(Number(value))} /><ChartTooltip content={<ChartTooltipContent indicator="line" formatter={(value) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(Number(value))} />} /><Line type="monotone" dataKey="actual" stroke="var(--color-actual)" strokeWidth={2.5} dot={false} connectNulls={false} isAnimationActive={!reducedMotion} /><Line type="monotone" dataKey="forecast" stroke="var(--color-forecast)" strokeWidth={2.5} strokeDasharray="5 4" dot={false} connectNulls={false} isAnimationActive={!reducedMotion} /><Line type="monotone" dataKey="lower_bound" stroke="var(--color-lower_bound)" strokeWidth={1} strokeDasharray="2 4" dot={false} connectNulls={false} isAnimationActive={!reducedMotion} /><Line type="monotone" dataKey="upper_bound" stroke="var(--color-upper_bound)" strokeWidth={1} strokeDasharray="2 4" dot={false} connectNulls={false} isAnimationActive={!reducedMotion} /></LineChart></ChartContainer></CardContent></Card> : null}
+      {result?.available ? <Card className="panel-card"><CardHeader className="panel-header"><div><CardTitle className="panel-title">Observed history and forecast</CardTitle><p className="panel-subtitle">Solid line is actual data; dashed lines show forecast and approximate interval bounds.</p></div><Button type="button" variant="outline" size="sm" onClick={() => downloadRowsAsCsv("forecast-results.csv", forecastExportRows)}>Download CSV</Button></CardHeader><CardContent><ChartContainer config={forecastChartConfig} className="forecast-chart"><LineChart accessibilityLayer key={isAnimationActive ? "animated" : "static"} data={forecastChartData} margin={{ left: 4, right: 12, top: 12, bottom: 0 }}><CartesianGrid vertical={false} strokeDasharray="3 3" /><XAxis dataKey="date" tickLine={false} axisLine={false} tickMargin={8} minTickGap={24} tickFormatter={(value) => new Date(String(value)).toLocaleDateString("en-IN", { month: "short", year: "2-digit" })} /><YAxis width={48} tickLine={false} axisLine={false} tickFormatter={(value) => new Intl.NumberFormat("en-IN", { notation: "compact", maximumFractionDigits: 1 }).format(Number(value))} /><ChartTooltip content={<ChartTooltipContent indicator="line" formatter={(value) => new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(Number(value))} />} /><Line type="monotone" dataKey="actual" stroke="var(--color-actual)" strokeWidth={2.5} dot={false} connectNulls={false} isAnimationActive={isAnimationActive} animationDuration={animationDuration} animationEasing={animationEasing} /><Line type="monotone" dataKey="forecast" stroke="var(--color-forecast)" strokeWidth={2.5} strokeDasharray="5 4" dot={false} connectNulls={false} isAnimationActive={isAnimationActive} animationDuration={animationDuration} animationEasing={animationEasing} /><Line type="monotone" dataKey="lower_bound" stroke="var(--color-lower_bound)" strokeWidth={1} strokeDasharray="2 4" dot={false} connectNulls={false} isAnimationActive={isAnimationActive} animationDuration={animationDuration} animationEasing={animationEasing} /><Line type="monotone" dataKey="upper_bound" stroke="var(--color-upper_bound)" strokeWidth={1} strokeDasharray="2 4" dot={false} connectNulls={false} isAnimationActive={isAnimationActive} animationDuration={animationDuration} animationEasing={animationEasing} /></LineChart></ChartContainer></CardContent></Card> : null}
       {result?.available ? <Card className="panel-card"><CardHeader><CardTitle className="panel-title">Forecast results</CardTitle><p className="panel-subtitle">{result.method} · {result.metric} · calculated from the uploaded history</p></CardHeader><CardContent><div className="table-wrap"><Table><TableHeader><TableRow>{forecastFields.map((field) => <TableHead key={field}>{field.replaceAll("_", " ")}</TableHead>)}</TableRow></TableHeader><TableBody>
                   {result.forecast.map((row, index) => (
                     <TableRow key={`${String(row[forecastFields[0]])}-${index}`}>{forecastFields.map((field) => <TableCell key={field}>{row[field] == null ? "—" : field === "date" && typeof row[field] === "string" ? new Date(row[field]).toLocaleDateString("en-IN", { month: "short", year: "numeric" }) : typeof row[field] === "number" ? new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(row[field] as number) : String(row[field])}</TableCell>)}</TableRow>
@@ -1285,6 +1882,7 @@ function PreferencesPage({ item }: { item: NavigationItem }) {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [messageError, setMessageError] = useState(false);
+  const { enabled: animationsEnabled, setEnabled: setAnimationsEnabled, systemReducedMotion } = useAnimationPreference();
 
   async function savePreferences(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1298,7 +1896,7 @@ function PreferencesPage({ item }: { item: NavigationItem }) {
     finally { setSaving(false); }
   }
 
-  return <div className="page-stack"><PageHeading item={item} /><Card className="panel-card profile-settings-card"><CardHeader><CardTitle className="panel-title">Workspace preferences</CardTitle><p className="panel-subtitle">Preferences are saved in the existing user_preferences table.</p></CardHeader><CardContent>{error ? <p className="assistant-error" role="alert">{error.message}</p> : null}{isLoading ? <div className="loading-panel" aria-label="Loading preferences" /> : <form className="preferences-form" onSubmit={savePreferences}><label>Currency<select value={preferences.currency} onChange={(event) => setPreferenceOverrides((current) => ({ ...current, currency: event.target.value }))}><option value="INR">INR · Indian rupee</option><option value="USD">USD · US dollar</option><option value="EUR">EUR · Euro</option><option value="GBP">GBP · Pound sterling</option></select></label><label>Date format<select value={preferences.date_format} onChange={(event) => setPreferenceOverrides((current) => ({ ...current, date_format: event.target.value }))}><option>DD MMM YYYY</option><option>MM/DD/YYYY</option><option>YYYY-MM-DD</option></select></label><label>Default reporting period<select value={preferences.default_period} onChange={(event) => setPreferenceOverrides((current) => ({ ...current, default_period: event.target.value }))}><option value="7d">Last 7 days</option><option value="30d">Last 30 days</option><option value="90d">Last 90 days</option><option value="12m">Last 12 months</option></select></label><label className="compact-toggle"><input type="checkbox" checked={preferences.compact_mode} onChange={(event) => setPreferenceOverrides((current) => ({ ...current, compact_mode: event.target.checked }))} /> Use compact data tables</label><Button type="submit" disabled={saving}>{saving ? "Saving…" : "Save preferences"}</Button></form>}{message ? <p className={cn("upload-message", messageError && "upload-message-error")} role={messageError ? "alert" : "status"}>{message}</p> : null}</CardContent></Card></div>;
+  return <div className="page-stack"><PageHeading item={item} /><Card className="panel-card profile-settings-card"><CardHeader><CardTitle className="panel-title">Workspace preferences</CardTitle><p className="panel-subtitle">Preferences are saved in the existing user_preferences table.</p></CardHeader><CardContent>{error ? <p className="assistant-error" role="alert">{error.message}</p> : null}{isLoading ? <div className="loading-panel" aria-label="Loading preferences" /> : <form className="preferences-form" onSubmit={savePreferences}><label>Currency<select value={preferences.currency} onChange={(event) => setPreferenceOverrides((current) => ({ ...current, currency: event.target.value }))}><option value="INR">INR · Indian rupee</option><option value="USD">USD · US dollar</option><option value="EUR">EUR · Euro</option><option value="GBP">GBP · Pound sterling</option></select></label><label>Date format<select value={preferences.date_format} onChange={(event) => setPreferenceOverrides((current) => ({ ...current, date_format: event.target.value }))}><option>DD MMM YYYY</option><option>MM/DD/YYYY</option><option>YYYY-MM-DD</option></select></label><label>Default reporting period<select value={preferences.default_period} onChange={(event) => setPreferenceOverrides((current) => ({ ...current, default_period: event.target.value }))}><option value="7d">Last 7 days</option><option value="30d">Last 30 days</option><option value="90d">Last 90 days</option><option value="12m">Last 12 months</option></select></label><label className="compact-toggle"><input type="checkbox" checked={preferences.compact_mode} onChange={(event) => setPreferenceOverrides((current) => ({ ...current, compact_mode: event.target.checked }))} /> Use compact data tables</label><label className="compact-toggle"><input type="checkbox" checked={animationsEnabled && !systemReducedMotion} disabled={systemReducedMotion} onChange={(event) => setAnimationsEnabled(event.target.checked)} /> Animate charts and KPI counters</label><p className="preferences-note">{systemReducedMotion ? "Your system requests reduced motion, so chart animations stay off." : "Chart animations are stored on this device and apply immediately. They also pause automatically for reduced-motion users."}</p><Button type="submit" disabled={saving}>{saving ? "Saving…" : "Save preferences"}</Button></form>}{message ? <p className={cn("upload-message", messageError && "upload-message-error")} role={messageError ? "alert" : "status"}>{message}</p> : null}</CardContent></Card></div>;
 }
 
 function OwnerAdminPage({ item }: { item: NavigationItem }) {
@@ -1320,6 +1918,9 @@ function OwnerAdminPage({ item }: { item: NavigationItem }) {
 
 export function FeaturePage({ item }: { item: NavigationItem & { group: string } }) {
   if (item.href === "/upload") return <UploadPage item={item} />;
+  if (item.href === "/visual-analytics") return <VisualAnalyticsPage item={item} />;
+  if (item.href === "/india-map") return <IndiaMapPage item={item} />;
+  if (item.href === "/city-analytics") return <CityAnalyticsPage item={item} />;
   if (item.href === "/datasets") return <DatasetPage item={item} />;
   if (item.href === "/activity") return <ActivityPage item={item} />;
   if (item.href === "/goals") return <GoalsPage item={item} />;
@@ -1328,6 +1929,7 @@ export function FeaturePage({ item }: { item: NavigationItem & { group: string }
   if (item.href === "/account-settings" || item.href === "/security") return <AccountSecurityPage item={item} />;
   if (item.href === "/preferences") return <PreferencesPage item={item} />;
   if (item.href === "/data-connections") return <DataConnectionsPage item={item} />;
+  if (item.href === "/stock-recommendations") return <StockRecommendationsPage item={item} />;
   if (item.href === "/performance-predictions") return <ScenarioPage item={item} />;
   if (item.group === "Business analytics") return <AnalyticsPage item={item} />;
   if (item.group === "AI intelligence") return <IntelligencePage item={item} />;

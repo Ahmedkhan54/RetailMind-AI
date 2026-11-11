@@ -7,11 +7,14 @@ from __future__ import annotations
 
 from io import BytesIO
 import csv
+from difflib import SequenceMatcher
 import logging
 import re
 import zipfile
 
 import pandas as pd
+
+from retailmind.utils import to_numeric_loose
 
 logger = logging.getLogger(__name__)
 
@@ -34,21 +37,46 @@ OPTIONAL_DEFAULTS = {
     "discount": pd.NA,
 }
 COLUMN_ALIASES = {
-    "order_id": ("order id", "order number", "invoice id", "invoice number", "transaction id", "id"),
-    "order_date": ("order date", "date", "sales date", "transaction date", "invoice date"),
-    "category": ("category", "product category", "segment", "department"),
-    "product_name": ("product name", "product", "item", "item name", "sku name"),
-    "city": ("city", "town", "location", "store city"),
-    "region": ("region", "area", "zone", "territory"),
-    "sales_rep": ("sales rep", "sales representative", "representative", "salesperson"),
-    "payment_method": ("payment method", "payment type", "payment"),
-    "sales": ("sales", "revenue", "sales amount", "total sales", "total revenue"),
-    "profit": ("profit", "net profit", "gross profit", "margin amount", "profit amount"),
-    "quantity": ("quantity", "units sold", "units", "qty", "unit quantity"),
-    "unit_price": ("unit price", "price per unit", "price"),
-    "customer": ("customer", "customer id", "customer name", "client", "client id"),
-    "discount": ("discount", "discount pct", "discount percent", "discount percentage", "discount rate"),
+    "order_id": (
+        "order id", "order number", "order no", "invoice id", "invoice number", "invoice no",
+        "transaction id", "transaction number", "bill id", "bill number", "receipt id", "reference id",
+    ),
+    "order_date": (
+        "order date", "date", "sales date", "transaction date", "invoice date", "purchase date",
+        "created date", "created at", "order datetime", "date of sale",
+    ),
+    "category": ("category", "product category", "item category", "segment", "department", "product type", "sub category"),
+    "product_name": ("product name", "product", "item", "item name", "sku name", "article", "goods", "service"),
+    "city": ("city", "town", "location", "store city", "branch city", "city name"),
+    "region": ("region", "area", "zone", "territory", "state", "province"),
+    "sales_rep": ("sales rep", "sales representative", "representative", "salesperson", "account manager"),
+    "payment_method": ("payment method", "payment type", "payment mode", "tender"),
+    "sales": (
+        "sales", "revenue", "sales amount", "total sales", "total revenue", "net sales", "gross sales",
+        "gross revenue", "sales value", "sales total", "revenue amount", "total amount", "order amount",
+        "order value", "order total", "billed amount", "bill amount", "invoice amount", "grand total",
+        "net revenue", "turnover", "gmv", "amount inr", "amount rs", "sales inr",
+    ),
+    "profit": (
+        "profit", "net profit", "gross profit", "margin amount", "profit amount", "profit value",
+        "earnings", "net income", "operating profit", "profit inr",
+    ),
+    "quantity": ("quantity", "units sold", "units", "qty", "unit quantity", "volume", "pieces", "item count"),
+    "unit_price": ("unit price", "price per unit", "price", "selling price", "rate", "mrp"),
+    "customer": (
+        "customer", "customer id", "customer name", "client", "client id", "client name",
+        "buyer", "buyer id", "account id", "shopper", "shopper id",
+    ),
+    "discount": ("discount", "discount pct", "discount percent", "discount percentage", "discount rate", "markdown"),
 }
+
+# Weak aliases are generic accounting words.  They are only accepted when the
+# file has other commercial signals, so a stray numeric "Amount" column is not
+# silently treated as revenue.
+WEAK_REVENUE_ALIASES = (
+    "amount", "total", "value", "income", "billing", "cart value", "basket value",
+    "total amount", "grand total", "total value", "net amount",
+)
 
 
 def normalise_name(value: object) -> str:
@@ -85,7 +113,7 @@ def profile_schema(frame: pd.DataFrame) -> dict[str, list[str]]:
             if parsed.notna().mean() >= 0.75:
                 date_columns.append(name)
                 continue
-        numeric = pd.to_numeric(sample, errors="coerce")
+        numeric = to_numeric_loose(sample)
         if numeric.notna().mean() >= 0.85 and not pd.api.types.is_bool_dtype(values):
             numeric_columns.append(name)
             if any(token in normalised for token in ("id", "code", "number", "reference")):
@@ -106,16 +134,70 @@ def profile_schema(frame: pd.DataFrame) -> dict[str, list[str]]:
     }
 
 
+def _alias_score(column: str, candidate: str) -> float:
+    """Score how strongly a header matches one canonical alias.
+
+    1.00 exact · 0.94 contains on token boundaries · 0.88 all tokens present ·
+    0.72 close typo match.  Scoring (rather than a first-match dict lookup)
+    handles ``Sales (₹)``, ``TOTAL_SALES``, ``Net Sales Value`` and similar
+    real-world exports without mapping unrelated numeric columns.
+    """
+    if column == candidate:
+        return 1.0
+    if not column or not candidate:
+        return 0.0
+    column_tokens = set(column.split())
+    candidate_tokens = set(candidate.split())
+    if candidate_tokens and candidate_tokens.issubset(column_tokens):
+        return 0.94
+    if f" {candidate} " in f" {column} ":
+        return 0.9
+    if len(candidate) >= 5 and SequenceMatcher(None, column, candidate).ratio() >= 0.86:
+        return 0.72
+    return 0.0
+
+
 def detect_column_mapping(columns) -> dict[str, str | None]:
-    """Suggest canonical fields from common source-column spellings."""
-    by_normalised = {normalise_name(column): str(column) for column in columns}
+    """Suggest canonical fields from common source-column spellings.
+
+    Detection is deterministic and explainable.  Every source column may be
+    assigned to at most one field, and weak aliases (``amount``, ``total``,
+    ``value``) require commercial context such as an order, product, customer,
+    quantity, or category column.
+    """
+    names = [str(column) for column in columns]
+    normalised = {normalise_name(column): column for column in names}
+    normalised_names = set(normalised)
+    commercial_context = any(
+        any(token in key for token in ("order", "product", "item", "sku", "customer", "client", "invoice", "quantity", "qty", "category", "sales", "revenue", "profit"))
+        for key in normalised_names
+    )
     mapping: dict[str, str | None] = {}
+    used: set[str] = set()
     for canonical in CANONICAL_COLUMNS:
-        candidates = (canonical.replace("_", " "),) + COLUMN_ALIASES[canonical]
-        mapping[canonical] = next(
-            (by_normalised[normalise_name(candidate)] for candidate in candidates if normalise_name(candidate) in by_normalised),
-            None,
-        )
+        aliases = (canonical.replace("_", " "),) + COLUMN_ALIASES[canonical]
+        if canonical == "sales":
+            aliases = aliases + WEAK_REVENUE_ALIASES
+        scored: list[tuple[float, int, str]] = []
+        for position, column in enumerate(names):
+            if column in used:
+                continue
+            key = normalise_name(column)
+            score = max((_alias_score(key, normalise_name(alias)) for alias in aliases), default=0.0)
+            if score <= 0:
+                continue
+            # A generic revenue alias is only trusted with commercial context.
+            if canonical == "sales" and not any(
+                _alias_score(key, normalise_name(alias)) >= 0.9 for alias in aliases if alias not in WEAK_REVENUE_ALIASES
+            ) and not commercial_context:
+                continue
+            scored.append((score, -position, column))
+        scored.sort(reverse=True)
+        if not scored:
+            mapping[canonical] = None
+            continue
+        mapping[canonical] = scored[0][2]
+        used.add(scored[0][2])
     return mapping
 
 
@@ -241,7 +323,7 @@ def profile_data(frame: pd.DataFrame, mapping: dict[str, str | None]) -> dict[st
             continue
         values = frame[source]
         present = values.notna() & values.astype("string").str.strip().ne("")
-        numeric = pd.to_numeric(values, errors="coerce")
+        numeric = to_numeric_loose(values)
         conversion_failures[field] = int((present & numeric.isna()).sum())
         suspicious_values[field] = {
             "negative": int((numeric < 0).sum()),

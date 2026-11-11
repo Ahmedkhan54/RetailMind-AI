@@ -13,6 +13,7 @@ from typing import Any
 import pandas as pd
 
 from data_sources import normalise_name, profile_schema
+from retailmind.utils import to_numeric_loose
 
 
 # Strong aliases are unambiguous.  Weak aliases ("amount", "total", "value")
@@ -332,7 +333,7 @@ def infer_schema(frame: pd.DataFrame) -> DatasetSchema:
         if non_null.empty:
             continue
         sample = non_null.iloc[:5000] if len(non_null) > 5000 else non_null
-        converted = pd.to_numeric(sample, errors="coerce")
+        converted = to_numeric_loose(sample)
         if converted.notna().mean() >= 0.78 and not pd.api.types.is_bool_dtype(frame[column]):
             numeric.append(str(column))
 
@@ -528,7 +529,7 @@ def profile_report(frame: pd.DataFrame, schema: DatasetSchema) -> dict[str, Any]
         "warnings": list(schema.warnings),
     }
     for column in schema.numeric:
-        series = pd.to_numeric(frame[column], errors="coerce").dropna()
+        series = to_numeric_loose(frame[column]).dropna()
         if series.empty:
             continue
         report["numeric_summary"][column] = {

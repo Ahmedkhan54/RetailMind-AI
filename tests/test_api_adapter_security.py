@@ -363,8 +363,8 @@ def test_customer_tagging_paginates_and_exports_full_owner_scoped_result():
         mapping={},
     )
     try:
-        first = retailmind_api.customer_segmentation(dataset_id, USER, offset=0, limit=2)
-        second = retailmind_api.customer_segmentation(dataset_id, USER, offset=2, limit=2)
+        first = retailmind_api.customer_segmentation(dataset_id, USER, offset=0, limit=2, clusters=None)
+        second = retailmind_api.customer_segmentation(dataset_id, USER, offset=2, limit=2, clusters=None)
         assert first["available"] is True
         assert first["customer_total"] == 5
         assert len(first["customers"]) == 2
@@ -377,8 +377,36 @@ def test_customer_tagging_paginates_and_exports_full_owner_scoped_result():
         assert "C1" in exported and "C5" in exported
         assert len(exported.splitlines()) == 6
         with pytest.raises(HTTPException) as error:
-            retailmind_api.customer_segmentation(dataset_id, replace(USER, id=USER.id + 1), offset=0, limit=2)
+            retailmind_api.customer_segmentation(dataset_id, replace(USER, id=USER.id + 1), offset=0, limit=2, clusters=None)
         assert error.value.status_code == 404
+    finally:
+        retailmind_api.DATASETS.pop(dataset_id, None)
+
+
+def test_customer_segmentation_honours_explicit_cluster_count():
+    dataset_id = "dataset-segments-clusters-27"
+    frame = retailmind_api.pd.DataFrame({
+        "cust_id": ["C1", "C2", "C3", "C4", "C5", "C6"],
+        "order_date": [
+            "2025-01-01", "2025-01-02", "2025-01-03",
+            "2025-01-04", "2025-01-05", "2025-01-06",
+        ],
+        "sales": [10, 20, 30, 40, 50, 60],
+    })
+    retailmind_api.DATASETS[dataset_id] = retailmind_api.DatasetRecord(
+        owner_id=USER.id,
+        filename="segments.csv",
+        frame=frame,
+        mapping={},
+    )
+    try:
+        payload = retailmind_api.customer_segmentation(dataset_id, USER, offset=0, limit=100, clusters=3)
+        assert payload["available"] is True
+        assert payload["cluster_count"] == 3
+        assert payload["customer_total"] == 6
+        assert {row["segment"] for row in payload["summary"]}
+        assert len(payload["summary"]) <= 3
+        assert isinstance(payload["silhouette"], (int, float))
     finally:
         retailmind_api.DATASETS.pop(dataset_id, None)
 
@@ -406,6 +434,77 @@ def test_inventory_recommendations_use_date_scoped_demand():
         assert filtered["available"] is True
         assert [row["product"] for row in filtered["recommendations"]] == ["Product B"]
         assert filtered["recommendations"][0]["avg_daily_sales"] == 3
+    finally:
+        retailmind_api.DATASETS.pop(dataset_id, None)
+
+
+def test_inventory_recommendations_use_stock_column_for_status_and_reorder():
+    dataset_id = "dataset-inventory-stock-27"
+    frame = retailmind_api.pd.DataFrame({
+        "product_name": ["Product A", "Product A", "Product A", "Product B", "Product B"],
+        "order_date": ["2025-01-01", "2025-01-02", "2025-01-03", "2025-01-01", "2025-01-02"],
+        "quantity": [10, 10, 10, 1, 1],
+        "current_stock": [5, 5, 5, 40, 40],
+    })
+    retailmind_api.DATASETS[dataset_id] = retailmind_api.DatasetRecord(
+        owner_id=USER.id,
+        filename="stock.csv",
+        frame=frame,
+        mapping={},
+    )
+    try:
+        payload = retailmind_api.inventory_recommendations(
+            dataset_id,
+            USER,
+            date_from=None,
+            date_to=None,
+        )
+        assert payload["available"] is True
+        assert payload["stock_available"] is True
+        by_product = {row["product"]: row for row in payload["recommendations"]}
+        assert set(by_product) == {"Product A", "Product B"}
+        assert by_product["Product A"]["current_stock"] == 5
+        assert by_product["Product A"]["suggested_reorder_quantity"] is not None
+        assert by_product["Product A"]["suggested_reorder_quantity"] > 0
+        assert by_product["Product A"]["status"] in {
+            "Out of stock",
+            "Critical — reorder now",
+            "Low — reorder soon",
+        }
+        assert by_product["Product B"]["status"] == "Healthy"
+        assert by_product["Product B"]["days_remaining"] is not None
+    finally:
+        retailmind_api.DATASETS.pop(dataset_id, None)
+
+
+def test_profit_forecast_uses_mapped_profit_and_requested_horizon():
+    dataset_id = "dataset-forecast-profit-27"
+    months = retailmind_api.pd.date_range("2023-01-01", periods=24, freq="MS")
+    frame = retailmind_api.pd.DataFrame({
+        "order_date": [month.strftime("%Y-%m-%d") for month in months],
+        "sales": [100 + index * 5 for index in range(24)],
+        "profit": [10 + index for index in range(24)],
+    })
+    retailmind_api.DATASETS[dataset_id] = retailmind_api.DatasetRecord(
+        owner_id=USER.id,
+        filename="profit-forecast.csv",
+        frame=frame,
+        mapping={},
+    )
+    try:
+        request = retailmind_api.ForecastRequest(
+            dataset_id=dataset_id,
+            metric_role="profit",
+            frequency="Monthly",
+            periods=3,
+            method="Linear trend",
+        )
+        payload = retailmind_api.forecast(request, USER)
+        assert payload["available"] is True
+        assert payload["metric"] == "profit"
+        assert len(payload["forecast"]) == 3
+        assert all(row.get("forecast") is not None for row in payload["forecast"])
+        assert payload["history"]
     finally:
         retailmind_api.DATASETS.pop(dataset_id, None)
 
@@ -438,3 +537,37 @@ def test_markdown_export_respects_inclusive_date_filter():
         assert "2025-01-02" in markdown and "2025-01-03" in markdown
     finally:
         retailmind_api.DATASETS.pop(dataset_id, None)
+
+
+@pytest.mark.parametrize(
+    ("environment", "expected"),
+    [
+        ({"RETAILMIND_COOKIE_SECURE": "true"}, True),
+        ({"RETAILMIND_COOKIE_SECURE": "YES"}, True),
+        ({"RETAILMIND_COOKIE_SECURE": "false", "VERCEL_ENV": "production"}, False),
+        ({"VERCEL_ENV": "production"}, True),
+        ({"RETAILMIND_PUBLIC_ORIGIN": "https://app.example.test"}, True),
+        ({"RETAILMIND_PUBLIC_ORIGIN": "http://localhost:3000"}, False),
+        ({}, False),
+    ],
+)
+def test_cookie_secure_flag_follows_https_configuration(monkeypatch, environment, expected):
+    for key in ("RETAILMIND_COOKIE_SECURE", "VERCEL_ENV", "RETAILMIND_PUBLIC_ORIGIN"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    assert auth_api._cookie_secure() is expected
+
+
+def test_session_cookie_can_be_marked_secure_for_https(monkeypatch, stub_auth):
+    monkeypatch.setenv("RETAILMIND_COOKIE_SECURE", "true")
+    response, _ = sign_in(stub_auth)
+    assert "Secure" in response.headers["set-cookie"]
+
+
+def test_session_cookie_stays_usable_on_plain_http(monkeypatch, stub_auth):
+    monkeypatch.setenv("RETAILMIND_COOKIE_SECURE", "false")
+    response, _ = sign_in(stub_auth)
+    cookie = response.headers["set-cookie"]
+    assert "Secure" not in cookie
+    assert "HttpOnly" in cookie and "SameSite=lax" in cookie

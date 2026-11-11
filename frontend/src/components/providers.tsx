@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
 import useSWR from "swr";
+import { AnimationPreferenceProvider } from "@/lib/animation-preference";
 
 export type ActiveDataset = {
   id: string;
@@ -38,8 +39,27 @@ export type SessionData = {
 
 type ApiError = Error & { status?: number };
 
+const REQUEST_TIMEOUT_MS = 20000;
+
 async function fetchJson<T>(url: string): Promise<T> {
-  const response = await fetch(url, { cache: "no-store" });
+  // A backend that is still booting (or unreachable) must never leave the UI
+  // on the session screen forever. Abort and surface a retryable error instead.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(url, { cache: "no-store", signal: controller.signal });
+  } catch (reason) {
+    const error = new Error(
+      reason instanceof DOMException && reason.name === "AbortError"
+        ? "The analytics service took too long to respond. Check that the Python API is running, then retry."
+        : "The analytics service could not be reached. Check your connection and that the Python API is running, then retry.",
+    ) as ApiError;
+    error.status = 0;
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(payload.detail || "Could not load workspace data.") as ApiError;
@@ -48,6 +68,8 @@ async function fetchJson<T>(url: string): Promise<T> {
   }
   return payload as T;
 }
+
+export { fetchJson };
 
 type DatasetContextValue = {
   dataset: ActiveDataset | null;
@@ -62,16 +84,23 @@ type SessionContextValue = {
   session: SessionData | null;
   sessionLoading: boolean;
   sessionError: ApiError | undefined;
+  retrySession: () => Promise<unknown>;
 };
 
 const DatasetContext = createContext<DatasetContextValue | null>(null);
 const SessionContext = createContext<SessionContextValue | null>(null);
 
 export function AppProviders({ children }: { children: ReactNode }) {
-  const { data: session, error: sessionError, isLoading: sessionLoading } = useSWR<SessionData>(
+  const { data: session, error: sessionError, isLoading: sessionLoading, mutate: retrySession } = useSWR<SessionData>(
     "/api/retailmind/auth/session",
     fetchJson,
-    { revalidateOnFocus: true, shouldRetryOnError: false },
+    {
+      revalidateOnFocus: true,
+      // One short retry smooths over a cold backend without masking a real outage.
+      shouldRetryOnError: true,
+      errorRetryCount: 1,
+      errorRetryInterval: 1500,
+    },
   );
   const { data: datasetIndex, isLoading: datasetsLoading, mutate: refreshDatasets } = useSWR<{ datasets: DatasetSummary[] }>(
     session ? "/api/retailmind/datasets" : null,
@@ -127,12 +156,15 @@ export function AppProviders({ children }: { children: ReactNode }) {
     session: session ?? null,
     sessionLoading,
     sessionError: sessionError as ApiError | undefined,
-  }), [session, sessionLoading, sessionError]);
+    retrySession: () => retrySession(),
+  }), [session, sessionLoading, sessionError, retrySession]);
 
   return (
-    <SessionContext.Provider value={sessionValue}>
-      <DatasetContext.Provider value={datasetValue}>{children}</DatasetContext.Provider>
-    </SessionContext.Provider>
+    <AnimationPreferenceProvider>
+      <SessionContext.Provider value={sessionValue}>
+        <DatasetContext.Provider value={datasetValue}>{children}</DatasetContext.Provider>
+      </SessionContext.Provider>
+    </AnimationPreferenceProvider>
   );
 }
 

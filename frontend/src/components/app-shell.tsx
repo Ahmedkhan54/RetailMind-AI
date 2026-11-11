@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -11,7 +11,6 @@ import {
   LogOut,
   Menu,
   Search,
-  Sparkles,
 } from "lucide-react";
 import { mutate } from "swr";
 import { Badge } from "@/components/ui/badge";
@@ -67,18 +66,45 @@ function NavigationLinks({ activeHref, onNavigate, role }: { activeHref: string;
 }
 
 function Sidebar({ activeHref, onNavigate, role }: { activeHref: string; onNavigate?: () => void; role?: string }) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!container) return;
+
+    // Restore scroll position
+    const saved = sessionStorage.getItem("retailmind_sidebar_scroll_top");
+    if (saved !== null) {
+      container.scrollTop = Number(saved);
+    }
+
+    // Keep active navigation item visible smoothly
+    const active = container.querySelector<HTMLElement>('[data-active="true"]');
+    if (active) {
+      const cRect = container.getBoundingClientRect();
+      const aRect = active.getBoundingClientRect();
+      if (aRect.top < cRect.top || aRect.bottom > cRect.bottom) {
+        active.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    }
+  }, [activeHref]);
+
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    sessionStorage.setItem("retailmind_sidebar_scroll_top", String(e.currentTarget.scrollTop));
+  };
+
   return (
     <div className="sidebar-inner">
       <div className="sidebar-brand"><Brand /></div>
-      <div className="sidebar-scroll"><NavigationLinks activeHref={activeHref} onNavigate={onNavigate} role={role} /></div>
+      <div className="sidebar-scroll" ref={scrollRef} onScroll={handleScroll}>
+        <NavigationLinks activeHref={activeHref} onNavigate={onNavigate} role={role} />
+      </div>
       <div className="sidebar-bottom">
-        <div className="sidebar-promo">
-          <span className="promo-icon"><Sparkles aria-hidden="true" /></span>
-          <strong>Make more of your data</strong>
-          <p>Connect your analytics service to unlock your workspace.</p>
-          <Link href="/data-connections" className="promo-link" onClick={onNavigate}>View setup guide <span aria-hidden="true">→</span></Link>
+        <div className="sidebar-footer">
+          <span className="avatar-small">RM</span>
+          <div><strong>Retail workspace</strong><span>Active Enterprise</span></div>
+          <ChevronDown aria-hidden="true" />
         </div>
-        <div className="sidebar-footer"><span className="avatar-small">RM</span><div><strong>Retail workspace</strong><span>Local preview</span></div><ChevronDown aria-hidden="true" /></div>
       </div>
     </div>
   );
@@ -86,7 +112,7 @@ function Sidebar({ activeHref, onNavigate, role }: { activeHref: string; onNavig
 
 export function AppShell({ children, currentHref, currentLabel }: { children: ReactNode; currentHref: string; currentLabel: string }) {
   const router = useRouter();
-  const { session, sessionLoading, sessionError } = useSession();
+  const { session, sessionLoading, sessionError, retrySession } = useSession();
   const { setDataset } = useDataset();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -133,12 +159,35 @@ export function AppShell({ children, currentHref, currentLabel }: { children: Re
     }
   }
 
-  if (sessionLoading || (!session && !sessionError) || sessionError?.status === 401) {
-    return <div className="auth-loading" role="status">Checking your secure session…</div>;
+  if (sessionError?.status === 401) {
+    return (
+      <div className="auth-loading auth-loading-error" role="alert">
+        <p>Your session has expired. Redirecting to sign in…</p>
+        <Link href={`/login?next=${encodeURIComponent(currentHref)}`}>Sign in again</Link>
+      </div>
+    );
   }
 
   if (sessionError) {
-    return <div className="auth-loading auth-loading-error" role="alert"><p>{sessionError.message}</p><Link href="/login">Return to sign in</Link></div>;
+    return (
+      <div className="auth-loading auth-loading-error" role="alert">
+        <p>{sessionError.message}</p>
+        <div className="auth-loading-actions">
+          <Button variant="outline" size="sm" onClick={() => void retrySession()}>Retry session check</Button>
+          <Link href="/login">Return to sign in</Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (sessionLoading || !session) {
+    return (
+      <div className="auth-loading" role="status" aria-live="polite">
+        <span>Checking your secure session…</span>
+        <small>This should only take a moment. If it does not, retry below.</small>
+        <Button variant="outline" size="sm" onClick={() => void retrySession()}>Retry</Button>
+      </div>
+    );
   }
 
   return (
@@ -187,7 +236,7 @@ export function AppShell({ children, currentHref, currentLabel }: { children: Re
               ) : null}
             </div>
             <Link href="/smart-alerts" className={cn(buttonVariants({ variant: "ghost", size: "icon" }), "topbar-icon-button")} aria-label="Open smart alerts"><Bell aria-hidden="true" /><span className="notification-dot" /></Link>
-            <Link href="/profile" className="profile-button" aria-label="Open user profile"><span className="profile-avatar">{session?.user.full_name.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "RM"}</span><span className="profile-name">{session?.user.full_name || "My account"}</span><ChevronDown aria-hidden="true" /></Link>
+            <Link href="/profile" className="profile-button" aria-label="Open user profile"><span className="profile-avatar">{(session?.user.full_name ?? "").split(/\s+/).filter(Boolean).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "RM"}</span><span className="profile-name">{session?.user.full_name || "My account"}</span><ChevronDown aria-hidden="true" /></Link>
             <Button variant="ghost" size="icon" className="topbar-icon-button" aria-label="Sign out" title="Sign out" disabled={loggingOut} onClick={handleLogout}><LogOut aria-hidden="true" /></Button>
           </div>
         </header>

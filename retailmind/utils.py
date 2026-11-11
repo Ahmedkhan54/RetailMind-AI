@@ -13,6 +13,37 @@ import pandas as pd
 
 CURRENCY = "₹"
 
+_CURRENCY_CHARS = re.compile(r"[₹$€£¥₩₽,\s\u00a0%]")
+
+
+def to_numeric_loose(values: Any) -> pd.Series:
+    """Convert currency-formatted or decorated numeric text to floats.
+
+    Real exports frequently contain ``₹1,23,456.78``, ``$1,200.00``,
+    ``(450)`` for negatives or a trailing currency code.  Plain
+    ``pd.to_numeric`` turns those into NaN, which made valid sales columns look
+    non-numeric and blocked uploads.  Plain numeric input is untouched.
+    """
+    if not isinstance(values, pd.Series):
+        values = pd.Series(values)
+    if pd.api.types.is_numeric_dtype(values):
+        return pd.to_numeric(values, errors="coerce")
+    text = values.astype("string").str.strip()
+    negative = text.str.match(r"^\(\s*.*\s*\)$", na=False)
+    # Accounting negatives wrap the number in parentheses; strip the brackets
+    # before parsing, otherwise ``(1,200)`` becomes NaN.
+    cleaned = text.str.replace(r"^\(\s*(.*?)\s*\)$", r"\1", regex=True)
+    cleaned = cleaned.str.replace(_CURRENCY_CHARS, "", regex=True)
+    # Prefixes such as ``Rs.``, ``INR`` or ``USD`` may include a trailing dot.
+    cleaned = cleaned.str.replace(r"^[A-Za-z]{1,4}\s*\.?\s*(?=[0-9])", "", regex=True)
+    cleaned = cleaned.str.replace(r"(?<=[0-9])\s*[A-Za-z]{1,4}$", "", regex=True)
+    numeric = pd.to_numeric(cleaned, errors="coerce")
+    # Keep the original parse when the loose form found nothing at all; this
+    # avoids masking genuinely invalid values as zero.
+    if numeric.notna().sum() == 0:
+        numeric = pd.to_numeric(values, errors="coerce")
+    return numeric.where(~negative, -numeric.abs())
+
 
 def parse_dates(values: pd.Series) -> pd.Series:
     """Parse text dates and Excel serial dates without a Unix fallback.

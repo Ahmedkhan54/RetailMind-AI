@@ -308,12 +308,52 @@ def _behavioural_labels(rfm: pd.DataFrame, labels: np.ndarray) -> dict[int, str]
     return mapping
 
 
+def business_tags(rfm: pd.DataFrame) -> pd.Series:
+    """Derive readable customer tags from real RFM behaviour.
+
+    Tags are computed from each customer's recency, frequency and monetary
+    position relative to the whole base.  No tag is random and none is derived
+    from the raw cluster number.
+    """
+    if rfm.empty:
+        return pd.Series(dtype="string")
+    recency = rfm["recency"] if "recency" in rfm else rfm["recency_days"]
+    frequency = rfm["frequency"]
+    monetary = rfm["monetary"] if "monetary" in rfm else rfm["monetary_value"]
+    r_hi = float(recency.quantile(0.75))
+    r_lo = float(recency.quantile(0.25))
+    r_extreme = float(recency.quantile(0.9))
+    f_hi = float(frequency.quantile(0.75))
+    f_lo = float(frequency.quantile(0.25))
+    m_hi = float(monetary.quantile(0.8))
+    m_mid = float(monetary.median())
+    tags: list[str] = []
+    for index in range(len(rfm)):
+        r = float(recency.iloc[index])
+        f = float(frequency.iloc[index])
+        m = float(monetary.iloc[index])
+        if m >= m_hi and f >= f_hi and r <= r_hi:
+            tags.append("VIP")
+        elif r >= r_extreme and f <= f_lo:
+            tags.append("Lost")
+        elif r >= r_hi and m >= m_mid:
+            tags.append("At Risk")
+        elif f >= f_hi or (m >= m_mid and r <= r_hi):
+            tags.append("Loyal")
+        elif r <= r_lo and f <= f_lo:
+            tags.append("New")
+        else:
+            tags.append("Regular")
+    return pd.Series(tags, index=rfm.index, dtype="string")
+
+
 def segment_customers(
     frame: pd.DataFrame,
     schema: DatasetSchema,
     *,
     max_clusters: int = 6,
     random_state: int = 42,
+    clusters: int | None = None,
 ) -> SegmentationResult:
     columns = detect_customer_columns(frame, schema)
     missing = [name for name in ("customer", "date") if not columns.get(name)]
@@ -347,12 +387,29 @@ def segment_customers(
         ]
     )
     scaled, _mean, _std = _standardize(features)
-    k, silhouette, labels = _choose_k(scaled, max_clusters, seed=random_state)
+    if clusters is not None:
+        # A caller-selected count is honoured exactly (bounded by the number of
+        # customers); the silhouette score still reports the resulting fit.
+        k = max(2, min(int(clusters), len(rfm) - 1))
+        labels, _centers, _inertia = kmeans_numpy(scaled, k, seed=random_state)
+        silhouette = silhouette_score_numpy(scaled, labels, seed=random_state)
+        if len(np.unique(labels)) < 2:
+            k, silhouette, labels = _choose_k(scaled, max_clusters, seed=random_state)
+    else:
+        k, silhouette, labels = _choose_k(scaled, max_clusters, seed=random_state)
     if k < 2:
         labels = np.zeros(len(rfm), dtype=int)
         silhouette = None
+    # Guarantee a meaningful split: if automatic selection collapsed to a
+    # single cluster, fall back to a small explicit k so the cluster column is
+    # never a constant zero for every customer.
+    if len(np.unique(labels)) < 2 and len(rfm) >= 3:
+        k = max(2, min(3, len(rfm) - 1))
+        labels, _centers, _inertia = kmeans_numpy(scaled, k, seed=random_state)
+        silhouette = silhouette_score_numpy(scaled, labels, seed=random_state)
     mapping = _behavioural_labels(rfm, labels)
     rfm["cluster"] = labels
+    rfm["cluster_label"] = [f"Cluster {int(label) + 1}" for label in labels]
     rfm["segment"] = [mapping.get(int(label), f"Segment {int(label) + 1}") for label in labels]
 
     # Rule-based risk flag: transparent, not a trained churn probability.
@@ -364,6 +421,7 @@ def segment_customers(
         np.where(rfm["recency"] > median_recency, "Monitor", "Low rule-based risk"),
     )
     rfm["is_rule_based_churn_risk"] = rfm["churn_risk_rule"].eq("High rule-based risk")
+    rfm["customer_tag"] = business_tags(rfm)
     rfm = rfm.rename(columns={"recency": "recency_days", "monetary": "monetary_value"})
 
     summary = (

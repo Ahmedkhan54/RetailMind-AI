@@ -11,6 +11,8 @@ pytest>=8.0
 # Optional document intelligence (RAG). Install only if you need these formats.
 # pypdf>=4.0            # PDF text extraction
 # python-docx>=1.1      # DOCX text extraction
+# pytesseract>=0.3      # optional scanned-PDF OCR (also needs Tesseract + pdf2image)
+# pdf2image>=1.17       # optional scanned-PDF OCR page rendering
 # reportlab>=4.0        # Optional PDF export in legacy src/business/reports.py
 
 # Optional vector stores for a future phase. Phase 1 uses the built-in NumPy-free

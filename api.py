@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 import json
+import math
 import os
 import secrets
 from pathlib import Path
@@ -21,8 +22,8 @@ import pandas as pd
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, Field
 
-from analytics import build_insights, calculate_kpis, grouped_performance, monthly_summary, prepare_data
-from retailmind.alerts import detect_alerts
+from analytics import build_insights, calculate_kpis, grouped_performance, monthly_summary, prepare_data, safe_ratio
+from retailmind.alerts import Alert, NotificationPreferences, SEVERITY_ORDER, detect_alerts, send_alert_digest, send_alert_email, send_test_email
 from retailmind.cleaning import DEFAULT_OPTIONS, analyse_cleaning, apply_cleaning
 from retailmind.exports import executive_pdf, markdown_report, workbook_bytes
 from retailmind.forecasting import forecast_dataset
@@ -31,7 +32,9 @@ from retailmind.powerbi import build_pbip, validate_pbip
 from retailmind.segmentation import segment_customers
 from data_sources import detect_column_mapping, duplicate_source_columns, profile_schema, read_uploaded_file
 from retailmind.ai.chat import answer_question
-from retailmind.ai.rag import RAGError, RAGStore
+from retailmind.ai.provider import get_provider
+from retailmind.ai.rag import MIN_RELEVANCE, RAGError, RAGStore
+from retailmind.config import get_ai_config, state_dir
 from retailmind.schema import infer_schema
 from src.analytics.enterprise import scenario_projection
 from src.business.goals import goal_progress
@@ -52,6 +55,7 @@ class DatasetRecord:
     frame: pd.DataFrame
     mapping: dict[str, str | None]
     created_at: Any | None = None
+    schema: Any | None = None
 
 
 DATASETS: OrderedDict[str, DatasetRecord] = OrderedDict()
@@ -102,6 +106,13 @@ def json_records(frame: pd.DataFrame) -> list[dict[str, Any]]:
     if frame.empty:
         return []
     return json.loads(frame.to_json(orient="records", date_format="iso"))
+
+
+def schema_for(record: DatasetRecord):
+    """Infer a dataset's schema once per process instead of on every request."""
+    if record.schema is None:
+        record.schema = infer_schema(record.frame)
+    return record.schema
 
 
 def canonical_frame(record: DatasetRecord) -> pd.DataFrame | None:
@@ -217,7 +228,7 @@ def dataset_cleaning_review(
     user: UserProfile = Depends(require_authenticated_user),
 ) -> dict[str, Any]:
     record = get_dataset(dataset_id, user.id)
-    schema = infer_schema(record.frame)
+    schema = schema_for(record)
     cleaned, report = apply_cleaning(record.frame, schema)
     return {
         "columns": [str(column) for column in record.frame.columns],
@@ -241,7 +252,7 @@ def export_cleaned_dataset(
     if unknown_options:
         raise HTTPException(status_code=422, detail="The request contains unsupported cleaning options.")
 
-    schema = infer_schema(record.frame)
+    schema = schema_for(record)
     cleaned, report = apply_cleaning(record.frame, schema, payload.options)
     stem = "".join(character for character in os.path.splitext(os.path.basename(record.filename))[0] if character.isalnum() or character in "-_").strip("-_") or "dataset"
     summary = json.dumps({
@@ -452,7 +463,7 @@ class ChatRequest(BaseModel):
 @app.post("/api/ai/chat", dependencies=[Depends(require_api_token)])
 def business_chat(payload: ChatRequest, user: UserProfile = Depends(require_authenticated_user)) -> dict[str, Any]:
     record = get_dataset(payload.dataset_id, user.id)
-    schema = infer_schema(record.frame)
+    schema = schema_for(record)
     response = answer_question(payload.question.strip(), record.frame, schema)
     return {
         "text": response.text,
@@ -465,11 +476,32 @@ def business_chat(payload: ChatRequest, user: UserProfile = Depends(require_auth
 
 class RAGQuestion(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
+    history: list[dict[str, str]] = Field(default_factory=list, max_length=20)
+
+
+def rag_store_path(user_id: int) -> Path:
+    return state_dir() / "rag" / f"user-{int(user_id)}.json"
 
 
 def get_rag_store(user_id: int) -> RAGStore:
+    """Return the user's index, recovering it from disk after a restart."""
     with RAG_LOCK:
-        return RAG_STORES.setdefault(user_id, RAGStore())
+        store = RAG_STORES.get(user_id)
+        if store is None:
+            store = RAGStore.load(str(rag_store_path(user_id)))
+            RAG_STORES[user_id] = store
+        return store
+
+
+def persist_rag_store(user_id: int, store: RAGStore) -> None:
+    try:
+        store.save(str(rag_store_path(user_id)))
+        for document in store.documents.values():
+            document["status"] = "indexed"
+    except OSError:
+        # Indexing still works in memory; status is reported honestly below.
+        for document in store.documents.values():
+            document["status"] = "indexed (not persisted)"
 
 
 @app.get("/api/ai/rag/documents", dependencies=[Depends(require_api_token)])
@@ -477,7 +509,29 @@ def list_rag_documents(user: UserProfile = Depends(require_authenticated_user)) 
     store = get_rag_store(user.id)
     with RAG_LOCK:
         documents = sorted(store.documents.values(), key=lambda item: str(item["name"]).casefold())
-    return {"documents": documents, "storage": "session-memory"}
+        chunk_count = len(store.chunks)
+    return {
+        "documents": documents,
+        "chunks": chunk_count,
+        "storage": "persistent-disk",
+        "retrieval": {"mode": "hybrid lexical + vector", "min_relevance": MIN_RELEVANCE},
+    }
+
+
+@app.get("/api/ai/rag/status", dependencies=[Depends(require_api_token)])
+def rag_status(user: UserProfile = Depends(require_authenticated_user)) -> dict[str, Any]:
+    store = get_rag_store(user.id)
+    config = get_ai_config().public_status()
+    with RAG_LOCK:
+        chunk_count = len(store.chunks)
+        documents = len(store.documents)
+    return {
+        "documents": documents,
+        "chunks": chunk_count,
+        "persistence": str(rag_store_path(user.id)),
+        "retrieval": {"mode": "hybrid lexical + vector", "min_relevance": MIN_RELEVANCE},
+        "generation": config,
+    }
 
 
 @app.post("/api/ai/rag/documents", dependencies=[Depends(require_api_token)])
@@ -489,21 +543,65 @@ async def add_rag_document(
     suffix = os.path.splitext(filename)[1].lower()
     if filename != os.path.basename(filename) or "/" in filename or "\\\\" in filename or len(filename) > 255:
         raise HTTPException(status_code=400, detail="Choose a document with a simple filename.")
-    if suffix not in {".txt", ".md", ".csv", ".json", ".pdf", ".docx"}:
-        raise HTTPException(status_code=415, detail="Upload TXT, MD, CSV, JSON, PDF, or DOCX documents.")
+    if suffix not in {".txt", ".md", ".csv", ".json", ".pdf", ".docx", ".xlsx", ".xls", ".xlsm"}:
+        raise HTTPException(status_code=415, detail="Upload TXT, MD, CSV, JSON, PDF, DOCX, or an Excel workbook.")
     content = file.file.read(5 * 1024 * 1024 + 1)
     if len(content) > 5 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="RAG documents must be 5 MB or smaller.")
+    if not content:
+        raise HTTPException(status_code=400, detail="The selected document is empty.")
     store = get_rag_store(user.id)
     try:
         with RAG_LOCK:
+            duplicate = store.has_duplicate(content)
+            if duplicate:
+                return {
+                    "document": dict(store.documents[duplicate]),
+                    "chunk_count": int(store.documents[duplicate].get("chunks") or 0),
+                    "duplicate": True,
+                    "message": f"This file is already indexed as {duplicate}.",
+                }
             if filename not in store.documents and len(store.documents) >= 25:
-                raise HTTPException(status_code=413, detail="A workspace can hold up to 25 RAG documents per service session.")
-            chunk_count = store.add_document(filename, content)
+                raise HTTPException(status_code=413, detail="A workspace can hold up to 25 RAG documents.")
+            chunk_count = store.add_document(filename, content, provider=get_provider())
+            document = dict(store.documents[filename])
+            persist_rag_store(user.id, store)
             document = dict(store.documents[filename])
     except RAGError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
-    return {"document": document, "chunk_count": chunk_count, "storage": "session-memory"}
+    return {
+        "document": document,
+        "chunk_count": chunk_count,
+        "duplicate": False,
+        "storage": "persistent-disk",
+        "generation": get_ai_config().public_status(),
+    }
+
+
+@app.post("/api/ai/rag/documents/{document_name}/reindex", dependencies=[Depends(require_api_token)])
+def reindex_rag_document(document_name: str, user: UserProfile = Depends(require_authenticated_user)) -> dict[str, Any]:
+    store = get_rag_store(user.id)
+    provider = get_provider()
+    with RAG_LOCK:
+        if document_name not in store.documents:
+            raise HTTPException(status_code=404, detail="Document not found.")
+        chunks = [chunk for chunk in store.chunks if chunk.doc_name == document_name]
+        if not chunks:
+            raise HTTPException(status_code=422, detail="This document has no indexed text to rebuild.")
+        texts = [chunk.text for chunk in chunks]
+        embeddings = provider.embed(texts) if provider.available else None
+        if not embeddings:
+            from retailmind.ai.provider import local_embed
+
+            embeddings = local_embed(texts)
+            kind = "local"
+        else:
+            kind = "provider"
+        for chunk, embedding in zip(chunks, embeddings):
+            chunk.embedding = embedding
+        store.documents[document_name]["embedding"] = kind
+        persist_rag_store(user.id, store)
+    return {"ok": True, "document": document_name, "chunks": len(chunks), "embedding": kind}
 
 
 @app.delete("/api/ai/rag/documents/{document_name}", dependencies=[Depends(require_api_token)])
@@ -511,6 +609,8 @@ def remove_rag_document(document_name: str, user: UserProfile = Depends(require_
     store = get_rag_store(user.id)
     with RAG_LOCK:
         removed = store.remove_document(document_name)
+        if removed:
+            persist_rag_store(user.id, store)
     if not removed:
         raise HTTPException(status_code=404, detail="Document not found.")
     return {"ok": True}
@@ -519,14 +619,20 @@ def remove_rag_document(document_name: str, user: UserProfile = Depends(require_
 @app.post("/api/ai/rag", dependencies=[Depends(require_api_token)])
 def rag_answer(payload: RAGQuestion, user: UserProfile = Depends(require_authenticated_user)) -> dict[str, Any]:
     store = get_rag_store(user.id)
+    history = [
+        {"role": turn.get("role", "user"), "content": turn.get("content", "")}
+        for turn in payload.history[-6:]
+        if turn.get("content")
+    ]
     with RAG_LOCK:
-        answer = store.answer(payload.question.strip())
+        answer = store.answer(payload.question.strip(), provider=get_provider(), history=history)
     return {
         "text": answer.text,
         "verified_retrieval": answer.verified_retrieval,
         "sources": [source.to_dict() for source in answer.sources],
         "note": answer.note,
         "used_llm": answer.used_llm,
+        "generation": get_ai_config().public_status(),
     }
 
 
@@ -565,6 +671,365 @@ def analytics_breakdown(
     }
 
 
+def _visual_dimension_rows(frame: pd.DataFrame, dimension: str, limit: int = 50) -> list[dict[str, Any]]:
+    """Aggregate one canonical dimension, ignoring blank labels."""
+    if dimension not in frame.columns:
+        return []
+    usable = frame[frame[dimension].notna()]
+    if usable.empty:
+        return []
+    return json_records(grouped_performance(usable, dimension).head(limit))
+
+
+def _visual_filter_options(frame: pd.DataFrame, dimension: str, limit: int = 200) -> list[str]:
+    """List real filter values ordered by their observed sales contribution."""
+    if dimension not in frame.columns:
+        return []
+    values = frame[[dimension, "sales"]].dropna(subset=[dimension]).copy()
+    values[dimension] = values[dimension].astype(str).str.strip()
+    values = values[values[dimension] != ""]
+    if values.empty:
+        return []
+    ordered = values.groupby(dimension)["sales"].sum().sort_values(ascending=False)
+    return [str(value) for value in ordered.index[:limit]]
+
+
+def _visual_month_dimension(frame: pd.DataFrame, dimension: str, limit: int = 8) -> list[dict[str, Any]]:
+    """Return month-by-dimension sales for stacked, ribbon, and heatmap charts."""
+    if dimension not in frame.columns:
+        return []
+    usable = frame.dropna(subset=["order_date"])
+    usable = usable[usable[dimension].notna()]
+    if usable.empty:
+        return []
+    totals = usable.groupby(dimension)["sales"].sum().sort_values(ascending=False).head(limit)
+    usable = usable[usable[dimension].isin(totals.index)].copy()
+    usable["month"] = usable["order_date"].dt.to_period("M").dt.to_timestamp()
+    grouped = usable.groupby([dimension, "month"], as_index=False)[["sales", "profit"]].sum()
+    grouped = grouped.rename(columns={"month": "date", dimension: "label"})
+    return json_records(grouped.sort_values(["date", "sales"], ascending=[True, False]))
+
+
+def _visual_cross_rows(
+    frame: pd.DataFrame,
+    row_dimension: str,
+    column_dimension: str,
+    row_limit: int = 10,
+    column_limit: int = 12,
+) -> list[dict[str, Any]]:
+    """Return a real two-dimension cross-tab used by matrix and heatmap views."""
+    if row_dimension not in frame.columns or column_dimension not in frame.columns:
+        return []
+    usable = frame.dropna(subset=[row_dimension, column_dimension])
+    if usable.empty:
+        return []
+    row_totals = usable.groupby(row_dimension)["sales"].sum().sort_values(ascending=False).head(row_limit)
+    column_totals = usable.groupby(column_dimension)["sales"].sum().sort_values(ascending=False).head(column_limit)
+    usable = usable[usable[row_dimension].isin(row_totals.index) & usable[column_dimension].isin(column_totals.index)]
+    if usable.empty:
+        return []
+    grouped = usable.groupby([row_dimension, column_dimension], as_index=False)[["sales", "profit"]].sum()
+    grouped = grouped.rename(columns={row_dimension: "row_label", column_dimension: "col_label"})
+    return json_records(grouped.sort_values("sales", ascending=False))
+
+
+def _visual_histogram(values: pd.Series, bins: int = 12) -> list[dict[str, Any]]:
+    """Build equal-width histogram bins from finite observed values."""
+    numeric = pd.to_numeric(values, errors="coerce").dropna()
+    numeric = numeric[numeric.map(lambda value: math.isfinite(float(value)))]
+    if numeric.empty:
+        return []
+    unique_count = int(numeric.nunique())
+    if unique_count <= 1:
+        value = float(numeric.iloc[0])
+        return [{"bin_start": value, "bin_end": value, "count": int(numeric.size), "label": f"{value:,.0f}"}]
+    binned = pd.cut(numeric, bins=min(bins, unique_count), duplicates="drop")
+    counts = binned.value_counts().sort_index()
+    rows: list[dict[str, Any]] = []
+    for interval, count in counts.items():
+        if int(count) <= 0:
+            continue
+        rows.append({
+            "bin_start": float(interval.left),
+            "bin_end": float(interval.right),
+            "count": int(count),
+            "label": f"{float(interval.left):,.0f} – {float(interval.right):,.0f}",
+        })
+    return rows
+
+
+def _visual_box_rows(frame: pd.DataFrame, dimension: str, measure: str = "sales", limit: int = 8) -> list[dict[str, Any]]:
+    """Summarise the observed distribution of a measure per dimension value."""
+    if dimension not in frame.columns or measure not in frame.columns:
+        return []
+    usable = frame.dropna(subset=[dimension])
+    if usable.empty:
+        return []
+    top = usable.groupby(dimension)[measure].sum().sort_values(ascending=False).head(limit)
+    rows: list[dict[str, Any]] = []
+    for key in top.index:
+        values = pd.to_numeric(usable.loc[usable[dimension] == key, measure], errors="coerce").dropna()
+        values = values[values.map(lambda value: math.isfinite(float(value)))]
+        if values.empty:
+            continue
+        rows.append({
+            "label": str(key),
+            "min": float(values.min()),
+            "q1": float(values.quantile(0.25)),
+            "median": float(values.median()),
+            "q3": float(values.quantile(0.75)),
+            "max": float(values.max()),
+            "mean": float(values.mean()),
+            "count": int(values.size),
+        })
+    return rows
+
+
+def _visual_pareto(product_rows: list[dict[str, Any]], limit: int = 15) -> list[dict[str, Any]]:
+    """Return product sales with cumulative contribution shares."""
+    usable = [row for row in product_rows if row.get("product_name") and isinstance(row.get("sales"), (int, float))]
+    total = sum(float(row["sales"]) for row in usable)
+    if total <= 0:
+        return []
+    running = 0.0
+    rows: list[dict[str, Any]] = []
+    for row in usable[:limit]:
+        running += float(row["sales"])
+        rows.append({
+            "label": str(row["product_name"]),
+            "sales": float(row["sales"]),
+            "share": float(row["sales"]) / total,
+            "cumulative_share": running / total,
+        })
+    return rows
+
+
+def _visual_waterfall(category_rows: list[dict[str, Any]], limit: int = 8) -> list[dict[str, Any]]:
+    """Show how each category contributes to total profit, including negatives."""
+    usable = [row for row in category_rows if isinstance(row.get("profit"), (int, float))]
+    if not usable:
+        return []
+    top = usable[:limit]
+    rest = usable[limit:]
+    if rest:
+        top = top + [{
+            "category": "Other",
+            "profit": sum(float(row["profit"]) for row in rest),
+            "sales": sum(float(row.get("sales") or 0) for row in rest),
+        }]
+    running = 0.0
+    rows: list[dict[str, Any]] = []
+    for row in top:
+        start = running
+        running += float(row["profit"])
+        rows.append({
+            "label": str(row.get("category") or "Unmapped"),
+            "value": float(row["profit"]),
+            "start": start,
+            "end": running,
+            "type": "increase" if float(row["profit"]) >= 0 else "decrease",
+        })
+    rows.append({"label": "Total profit", "value": running, "start": 0.0, "end": running, "type": "total"})
+    return rows
+
+
+def _visual_funnel(product_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Describe observed sales concentration across the leading products."""
+    usable = [row for row in product_rows if isinstance(row.get("sales"), (int, float))]
+    if not usable:
+        return []
+    total = sum(float(row["sales"]) for row in usable)
+    if total <= 0:
+        return []
+    thresholds = [1, 3, 5, 10]
+    stages: list[dict[str, Any]] = []
+    running = 0.0
+    added = 0
+    for index, row in enumerate(usable, start=1):
+        running += float(row["sales"])
+        if index in thresholds or index == len(usable):
+            label = f"Top {index} product{'s' if index != 1 else ''}" if index < len(usable) else f"All {len(usable)} products"
+            stages.append({"stage": label, "value": running, "share": running / total, "products": index})
+            added += 1
+    return stages if added else []
+
+
+def _visual_decomposition(category_rows: list[dict[str, Any]], product_rows: list[dict[str, Any]], limit: int = 6) -> dict[str, Any]:
+    """Build a compact category-to-product decomposition tree from real totals."""
+    total = sum(float(row.get("sales") or 0) for row in category_rows)
+    children: list[dict[str, Any]] = []
+    for category in category_rows[:limit]:
+        name = str(category.get("category") or "Unmapped")
+        products = [
+            {"label": str(row.get("product_name")), "value": float(row.get("sales") or 0)}
+            for row in product_rows
+            if str(row.get("category") or "Unmapped") == name
+        ][:5]
+        children.append({
+            "label": name,
+            "value": float(category.get("sales") or 0),
+            "children": products,
+        })
+    return {"label": "Total sales", "value": total, "children": children}
+
+
+def _visual_influencers(category_rows: list[dict[str, Any]], overall_margin: float | None) -> list[dict[str, Any]]:
+    """Rank dimensions by observed sales contribution and margin difference."""
+    total = sum(float(row.get("sales") or 0) for row in category_rows)
+    rows: list[dict[str, Any]] = []
+    for row in category_rows[:10]:
+        sales = float(row.get("sales") or 0)
+        margin = row.get("margin")
+        rows.append({
+            "label": str(row.get("category") or "Unmapped"),
+            "sales": sales,
+            "profit": float(row.get("profit") or 0),
+            "share": safe_ratio(sales, total),
+            "margin": margin,
+            "margin_delta": (float(margin) - overall_margin) if isinstance(margin, (int, float)) and overall_margin is not None else None,
+        })
+    return rows
+
+
+@app.get("/api/visuals/{dataset_id}", dependencies=[Depends(require_api_token)])
+def visual_analytics(
+    dataset_id: str,
+    user: UserProfile = Depends(require_authenticated_user),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    category: str | None = Query(default=None, max_length=200),
+    city: str | None = Query(default=None, max_length=200),
+    region: str | None = Query(default=None, max_length=200),
+) -> dict[str, Any]:
+    """Return additive aggregates for every advanced chart type.
+
+    All values are calculated from the same canonical frame used by the
+    dashboard and analytics endpoints. No chart-specific sample data is added.
+    """
+    record = get_dataset(dataset_id, user.id)
+    source_frame, _filters = filter_export_frame(record, date_from, date_to)
+    filtered_record = DatasetRecord(
+        owner_id=record.owner_id,
+        filename=record.filename,
+        frame=source_frame,
+        mapping=record.mapping,
+        created_at=record.created_at,
+    )
+    frame = canonical_frame(filtered_record)
+    if frame is None:
+        return {
+            "available": False,
+            "dataset_id": dataset_id,
+            "dataset_name": record.filename,
+            "filters": {"category": [], "city": [], "region": []},
+            "notes": ["Map sales, profit, date, category, product, city, and order fields before using visual analytics."],
+        }
+
+    selected = {"category": category, "city": city, "region": region}
+    option_frame = frame
+    applied: dict[str, str] = {}
+    for field, value in selected.items():
+        if not value or value.casefold() == "all":
+            continue
+        if field not in frame.columns:
+            raise HTTPException(status_code=422, detail=f"The uploaded file has no mapped {field} field to filter by.")
+        mask = frame[field].astype("string").str.casefold() == value.casefold()
+        frame = frame[mask]
+        applied[field] = value
+
+    if frame.empty:
+        return {
+            "available": False,
+            "dataset_id": dataset_id,
+            "dataset_name": record.filename,
+            "filters": {"category": [], "city": [], "region": []},
+            "applied_filters": applied,
+            "row_count": 0,
+            "matched_rows": 0,
+            "filters": {
+                "category": _visual_filter_options(option_frame, "category"),
+                "city": _visual_filter_options(option_frame, "city"),
+                "region": _visual_filter_options(option_frame, "region"),
+            },
+            "notes": ["No records match the selected filters."],
+        }
+
+    dimension_available = {
+        name: name in frame.columns for name in ("category", "product_name", "city", "region", "customer", "order_id")
+    }
+    category_rows = _visual_dimension_rows(frame, "category", limit=100)
+    product_rows = _visual_dimension_rows(frame, "product_name", limit=100)
+    city_rows = _visual_dimension_rows(frame, "city", limit=100)
+    region_rows = _visual_dimension_rows(frame, "region", limit=100)
+    kpis = calculate_kpis(frame)
+    for role, key in (("customer", "total_customers"), ("product_name", "total_products")):
+        column = role if role in frame.columns else None
+        kpis[key] = int(frame[column].nunique(dropna=True)) if column else None
+    overall_margin = kpis.get("profit_margin") if isinstance(kpis.get("profit_margin"), (int, float)) else None
+
+    return {
+        "available": True,
+        "dataset_id": dataset_id,
+        "dataset_name": record.filename,
+        "row_count": int(len(source_frame)),
+        "matched_rows": int(len(frame)),
+        "applied_filters": applied,
+        "kpis": kpis,
+        "dimensions": dimension_available,
+        "filters": {
+            "category": _visual_filter_options(option_frame, "category"),
+            "city": _visual_filter_options(option_frame, "city"),
+            "region": _visual_filter_options(option_frame, "region"),
+        },
+        "monthly": json_records(monthly_summary(frame).rename(columns={"month": "date"})),
+        "categories": category_rows,
+        "products": product_rows,
+        "cities": city_rows,
+        "regions": region_rows,
+        "category_month": _visual_month_dimension(frame, "category"),
+        "category_city": _visual_cross_rows(frame, "category", "city"),
+        "region_month": _visual_month_dimension(frame, "region"),
+        "product_category": [
+            {
+                "product_name": row.get("product_name"),
+                "category": row.get("category"),
+                "sales": row.get("sales"),
+                "profit": row.get("profit"),
+            }
+            for row in product_rows
+            if row.get("product_name") and row.get("category")
+        ][:40],
+        "histogram": {
+            "sales": _visual_histogram(frame["sales"]),
+            "profit": _visual_histogram(frame["profit"]),
+        },
+        "box": {
+            "sales_by_category": _visual_box_rows(frame, "category", "sales"),
+            "profit_by_category": _visual_box_rows(frame, "category", "profit"),
+        },
+        "scatter": json_records(
+            frame[["sales", "profit"] + [name for name in ("category", "city", "product_name") if name in frame.columns]]
+            .sample(n=min(400, len(frame)), random_state=42)
+            .sort_values("sales", ascending=False)
+        ),
+        "pareto": _visual_pareto(product_rows),
+        "waterfall": _visual_waterfall(category_rows),
+        "funnel": _visual_funnel(product_rows),
+        "decomposition": _visual_decomposition(category_rows, product_rows),
+        "influencers": _visual_influencers(category_rows, overall_margin),
+        "notes": [
+            note
+            for note in (
+                "State-level map values use the mapped region field; city markers use a bundled coordinate gazetteer and never infer a location for an unknown city."
+                if not region_rows else None,
+                "Geographic values are only those present in the uploaded dataset; unmatched locations are listed rather than estimated."
+                if region_rows or city_rows else None,
+            )
+            if note
+        ],
+    }
+
+
 @app.get("/api/ai/insights/{dataset_id}", dependencies=[Depends(require_api_token)])
 def business_insights(dataset_id: str, user: UserProfile = Depends(require_authenticated_user)) -> dict[str, Any]:
     record = get_dataset(dataset_id, user.id)
@@ -575,11 +1040,308 @@ def business_insights(dataset_id: str, user: UserProfile = Depends(require_authe
     return {"available": True, "insights": insights, "notes": []}
 
 
+ALERT_STATE_LOCK = RLock()
+SEVERITY_LABELS = {"critical": "Critical", "warning": "High", "info": "Medium"}
+
+
+def alert_state_path(user_id: int) -> Path:
+    return state_dir() / "alerts" / f"user-{int(user_id)}.json"
+
+
+def load_alert_state(user_id: int) -> dict[str, Any]:
+    path = alert_state_path(user_id)
+    if not path.exists():
+        return {"datasets": {}}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"datasets": {}}
+
+
+def save_alert_state(user_id: int, state: dict[str, Any]) -> None:
+    path = alert_state_path(user_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def humanize_scope(scope: str) -> tuple[str, str]:
+    """Turn ``product_name:Office Chair`` into a readable label."""
+    if not scope or ":" not in scope:
+        return (scope or "Overall", "")
+    dimension, value = scope.split(":", 1)
+    labels = {
+        "product_name": "Product", "category": "Category", "city": "City", "region": "Region",
+        "customer": "Customer", "sales_rep": "Sales representative", "payment_method": "Payment method",
+    }
+    return (value.strip(), labels.get(dimension.strip(), dimension.replace("_", " ").title()))
+
+
+def merged_alert_rows(user_id: int, dataset_id: str, alerts: list[Alert]) -> list[dict[str, Any]]:
+    state = load_alert_state(user_id)
+    stored = (state.get("datasets") or {}).get(dataset_id, {})
+    rows: list[dict[str, Any]] = []
+    for alert in alerts:
+        entry = stored.get(alert.id, {})
+        value, dimension = humanize_scope(alert.scope)
+        row = asdict(alert)
+        row.update({
+            "status": entry.get("status", alert.status),
+            "acknowledged_at": entry.get("updated_at", alert.acknowledged_at),
+            "status_note": entry.get("note", ""),
+            "severity_label": SEVERITY_LABELS.get(alert.severity, alert.severity.title()),
+            "scope_label": value,
+            "scope_dimension": dimension,
+        })
+        rows.append(row)
+    rows.sort(key=lambda row: (SEVERITY_ORDER.get(str(row.get("severity")), 9), str(row.get("title"))))
+    return rows
+
+
+def effective_alert_preferences(user: UserProfile) -> NotificationPreferences:
+    """Deployment SMTP settings with the account's enable/severity overrides."""
+    preferences = NotificationPreferences.from_env()
+    state = load_alert_state(user.id)
+    overrides = state.get("preferences") or {}
+    if isinstance(overrides.get("enabled"), bool):
+        preferences.email_enabled = overrides["enabled"]
+    if overrides.get("min_severity") in {"critical", "warning", "info"}:
+        preferences.min_severity = overrides["min_severity"]
+    if overrides.get("frequency") in {"instant", "daily"}:
+        preferences.frequency = overrides["frequency"]
+    if preferences.email_enabled and not preferences.recipients and user.email:
+        preferences.recipients = (user.email,)
+    return preferences
+
+
+def dispatch_alert_emails(
+    user_id: int,
+    dataset_id: str,
+    alerts: list[Alert],
+    rows: list[dict[str, Any]],
+    preferences: NotificationPreferences | None = None,
+) -> dict[str, Any]:
+    preferences = preferences or NotificationPreferences.from_env()
+    if not preferences.configured():
+        return {
+            "enabled": preferences.email_enabled,
+            "configured": False,
+            "status": "not_configured",
+            "missing": [
+                name for name, present in (
+                    ("RETAILMIND_ALERT_EMAIL_ENABLED", preferences.email_enabled),
+                    ("RETAILMIND_ALERT_EMAIL_TO", bool(preferences.recipients)),
+                    ("RETAILMIND_SMTP_HOST", bool(preferences.smtp_host)),
+                    ("RETAILMIND_SMTP_FROM", bool(preferences.sender)),
+                ) if not present
+            ],
+            "sent": [],
+        }
+    by_id = {alert.id: alert for alert in alerts}
+    state = load_alert_state(user_id)
+    dataset_state = (state.setdefault("datasets", {}).setdefault(dataset_id, {}))
+    base_link = f"{(os.getenv('RETAILMIND_PUBLIC_ORIGIN') or 'http://localhost:3000').rstrip('/')}/smart-alerts"
+    eligible: list[tuple[Alert, dict[str, Any], dict[str, Any]]] = []
+    for row in rows:
+        if row.get("severity") not in {"critical", "warning"}:
+            continue
+        if row.get("status") in {"dismissed", "resolved"}:
+            continue
+        alert = by_id.get(str(row.get("id")))
+        if alert is None:
+            continue
+        entry = dataset_state.setdefault(alert.id, {})
+        attempts = int(entry.get("delivery_attempts") or 0)
+        if entry.get("notified_at") or attempts >= 3:
+            continue
+        eligible.append((alert, row, entry))
+    if not eligible:
+        return {"enabled": True, "configured": True, "status": "no_new_alerts", "sent": [], "failed": [], "max_attempts": 3}
+
+    sent: list[dict[str, str]] = []
+    failed: list[dict[str, str]] = []
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    def record(alert: Alert, entry: dict[str, Any], delivery: str) -> None:
+        entry["delivery"] = delivery
+        entry["delivery_attempts"] = int(entry.get("delivery_attempts") or 0) + 1
+        entry["last_attempt_at"] = now
+        if delivery == "accepted_by_smtp":
+            entry["notified_at"] = now
+            entry.pop("last_delivery_error", None)
+            sent.append({"alert_id": alert.id, "title": alert.title, "delivery": delivery})
+        else:
+            # A failed hand-off must remain retryable on a later check.
+            entry["last_delivery_error"] = delivery
+            failed.append({"alert_id": alert.id, "title": alert.title, "delivery": delivery})
+
+    if preferences.frequency == "daily":
+        today = now[:10]
+        if state.get("last_digest_date") == today:
+            return {"enabled": True, "configured": True, "status": "digest_already_sent", "sent": [], "failed": [], "max_attempts": 3}
+        delivery = send_alert_digest([alert for alert, _row, _entry in eligible], preferences, base_link)
+        for alert, _row, entry in eligible:
+            record(alert, entry, delivery)
+        if delivery == "accepted_by_smtp":
+            state["last_digest_date"] = today
+        save_alert_state(user_id, state)
+        return {
+            "enabled": True,
+            "configured": True,
+            "status": "digest_sent" if delivery == "accepted_by_smtp" else "failed",
+            "sent": sent,
+            "failed": failed,
+            "max_attempts": 3,
+        }
+
+    for alert, _row, entry in eligible:
+        record(alert, entry, send_alert_email(alert, preferences, f"{base_link}#alert-{alert.id}"))
+    save_alert_state(user_id, state)
+    status = "sent" if sent else "failed"
+    return {"enabled": True, "configured": True, "status": status, "sent": sent, "failed": failed, "max_attempts": 3}
+
+
+class AlertPreferenceRequest(BaseModel):
+    enabled: bool
+    min_severity: Literal["critical", "warning", "info"] = "warning"
+    frequency: Literal["instant", "daily"] = "instant"
+
+
+def _preference_payload(user: UserProfile) -> dict[str, Any]:
+    preferences = effective_alert_preferences(user)
+    return {
+        "enabled": preferences.email_enabled,
+        "configured": preferences.configured(),
+        "smtp_ready": preferences.smtp_ready(),
+        "min_severity": preferences.min_severity,
+        "frequency": preferences.frequency,
+        "recipient_count": len(preferences.recipients),
+        "missing": [
+            name for name, present in (
+                ("RETAILMIND_ALERT_EMAIL_TO", bool(preferences.recipients)),
+                ("RETAILMIND_SMTP_HOST", bool(preferences.smtp_host)),
+                ("RETAILMIND_SMTP_FROM", bool(preferences.sender)),
+            ) if not present
+        ],
+    }
+
+
+@app.get("/api/ai/alerts/preferences", dependencies=[Depends(require_api_token)])
+def get_alert_preferences(user: UserProfile = Depends(require_authenticated_user)) -> dict[str, Any]:
+    return _preference_payload(user)
+
+
+@app.post("/api/ai/alerts/email/test", dependencies=[Depends(require_api_token)])
+def test_alert_email(user: UserProfile = Depends(require_authenticated_user)) -> dict[str, Any]:
+    """Send one clearly-labelled test message to the signed-in account."""
+    preferences = effective_alert_preferences(user)
+    if not preferences.smtp_host or not preferences.sender:
+        return {
+            "ok": False,
+            "status": "not_configured",
+            "missing": [
+                name for name, present in (
+                    ("RETAILMIND_SMTP_HOST", bool(preferences.smtp_host)),
+                    ("RETAILMIND_SMTP_FROM", bool(preferences.sender)),
+                ) if not present
+            ],
+            "note": "Set the SMTP variables and restart the API before testing.",
+        }
+    delivery = send_test_email(preferences, user.email)
+    return {
+        "ok": delivery == "accepted_by_smtp",
+        "status": delivery,
+        "note": (
+            "The SMTP server accepted the test message. Inbox delivery is not guaranteed."
+            if delivery == "accepted_by_smtp"
+            else "The SMTP server did not accept the test message. Check the server logs and configuration."
+        ),
+    }
+
+
+@app.post("/api/ai/alerts/preferences", dependencies=[Depends(require_api_token)])
+def set_alert_preferences(
+    payload: AlertPreferenceRequest,
+    user: UserProfile = Depends(require_authenticated_user),
+) -> dict[str, Any]:
+    with ALERT_STATE_LOCK:
+        state = load_alert_state(user.id)
+        state["preferences"] = {
+            "enabled": payload.enabled,
+            "min_severity": payload.min_severity,
+            "frequency": payload.frequency,
+        }
+        save_alert_state(user.id, state)
+    return _preference_payload(user)
+
+
 @app.get("/api/ai/alerts/{dataset_id}", dependencies=[Depends(require_api_token)])
 def business_alerts(dataset_id: str, user: UserProfile = Depends(require_authenticated_user)) -> dict[str, Any]:
     record = get_dataset(dataset_id, user.id)
-    alerts = detect_alerts(record.frame, infer_schema(record.frame))
-    return {"available": True, "alerts": [asdict(alert) for alert in alerts], "count": len(alerts)}
+    alerts = detect_alerts(record.frame, schema_for(record))
+    rows = merged_alert_rows(user.id, dataset_id, alerts)
+    email_status = {"enabled": False, "configured": False, "status": "disabled", "sent": []}
+    if os.getenv("RETAILMIND_ALERT_AUTO_EMAIL", "1").lower() in {"1", "true", "yes"}:
+        try:
+            email_status = dispatch_alert_emails(user.id, dataset_id, alerts, rows, effective_alert_preferences(user))
+        except OSError:
+            email_status = {"enabled": True, "configured": True, "status": "storage_error", "sent": []}
+    return {
+        "available": True,
+        "alerts": rows,
+        "count": len(rows),
+        "severity_counts": {label: sum(1 for row in rows if row.get("severity_label") == label) for label in ("Critical", "High", "Medium")},
+        "email": email_status,
+    }
+
+
+class AlertStatusRequest(BaseModel):
+    action: Literal["acknowledge", "dismiss", "resolve", "reopen"]
+    note: str = Field(default="", max_length=500)
+
+
+@app.post("/api/ai/alerts/{dataset_id}/{alert_id}/status", dependencies=[Depends(require_api_token)])
+def update_alert_status(
+    dataset_id: str,
+    alert_id: str,
+    payload: AlertStatusRequest,
+    user: UserProfile = Depends(require_authenticated_user),
+) -> dict[str, Any]:
+    record = get_dataset(dataset_id, user.id)
+    alerts = detect_alerts(record.frame, schema_for(record))
+    if not any(alert.id == alert_id for alert in alerts):
+        raise HTTPException(status_code=404, detail="This alert no longer matches the active dataset.")
+    status = {"acknowledge": "acknowledged", "dismiss": "dismissed", "resolve": "resolved", "reopen": "new"}[payload.action]
+    with ALERT_STATE_LOCK:
+        state = load_alert_state(user.id)
+        dataset_state = state.setdefault("datasets", {}).setdefault(dataset_id, {})
+        entry = dataset_state.setdefault(alert_id, {})
+        entry["status"] = status
+        entry["note"] = payload.note
+        entry["updated_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        save_alert_state(user.id, state)
+    return {"ok": True, "alert_id": alert_id, "status": status, "persistence": "disk"}
+
+
+@app.get("/api/ai/alerts/email/status", dependencies=[Depends(require_api_token)])
+def alert_email_status(user: UserProfile = Depends(require_authenticated_user)) -> dict[str, Any]:
+    preferences = effective_alert_preferences(user)
+    return {
+        "enabled": preferences.email_enabled,
+        "configured": preferences.configured(),
+        "recipients": len(preferences.recipients),
+        "min_severity": preferences.min_severity,
+        "missing": [
+            name for name, present in (
+                ("RETAILMIND_ALERT_EMAIL_ENABLED", preferences.email_enabled),
+                ("RETAILMIND_ALERT_EMAIL_TO", bool(preferences.recipients)),
+                ("RETAILMIND_SMTP_HOST", bool(preferences.smtp_host)),
+                ("RETAILMIND_SMTP_FROM", bool(preferences.sender)),
+            ) if not present
+        ],
+        "note": "Email is sent only when the SMTP server accepts the message; delivery is never assumed.",
+    }
 
 
 @app.get("/api/segmentation/{dataset_id}", dependencies=[Depends(require_api_token)])
@@ -588,19 +1350,58 @@ def customer_segmentation(
     user: UserProfile = Depends(require_authenticated_user),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=250),
+    clusters: int | None = Query(default=None, ge=2, le=10),
+    tag: str | None = Query(default=None, max_length=40),
+    search: str | None = Query(default=None, max_length=120),
+    cluster: int | None = Query(default=None, ge=0, le=20),
+    sort: Literal["monetary", "recency", "frequency", "customer"] = "monetary",
 ) -> dict[str, Any]:
+    # Support both HTTP calls and direct unit-test calls (whose unpassed
+    # defaults are FastAPI Query objects rather than plain values).
+    if not isinstance(tag, str):
+        tag = None
+    if not isinstance(search, str):
+        search = None
+    if not isinstance(cluster, int):
+        cluster = None
+    if not isinstance(clusters, int):
+        clusters = None
+    if sort not in {"monetary", "recency", "frequency", "customer"}:
+        sort = "monetary"
     record = get_dataset(dataset_id, user.id)
-    result = segment_customers(record.frame, infer_schema(record.frame))
-    customers = result.rfm.iloc[offset : offset + limit]
+    result = segment_customers(record.frame, schema_for(record), clusters=clusters)
+    filtered = result.rfm
+    if tag and "customer_tag" in filtered.columns:
+        filtered = filtered[filtered["customer_tag"].astype("string").str.casefold() == tag.casefold()]
+    if search and "customer_id" in filtered.columns:
+        filtered = filtered[filtered["customer_id"].astype("string").str.contains(search, case=False, regex=False, na=False)]
+    if cluster is not None and "cluster" in filtered.columns:
+        filtered = filtered[filtered["cluster"] == cluster]
+    sort_columns = {
+        "monetary": ("monetary", False),
+        "recency": ("recency", True),
+        "frequency": ("frequency", False),
+        "customer": ("customer_id", True),
+    }
+    sort_column, ascending = sort_columns[sort]
+    if sort_column in filtered.columns:
+        filtered = filtered.sort_values(sort_column, ascending=ascending)
+    customers = filtered.iloc[offset : offset + limit]
+    tags: dict[str, int] = {}
+    if result.available and "customer_tag" in result.rfm.columns:
+        tags = {str(key): int(value) for key, value in result.rfm["customer_tag"].value_counts().items()}
     return {
         "available": result.available,
         "summary": json_records(result.summary),
         "customers": json_records(customers),
-        "customer_total": len(result.rfm),
+        "customer_total": len(filtered),
+        "base_total": len(result.rfm),
         "customer_offset": offset,
         "customer_limit": limit,
         "cluster_count": result.k,
         "silhouette": result.silhouette,
+        "tags": tags,
+        "tag_total": int(sum(tags.values())),
         "notes": result.notes,
     }
 
@@ -612,7 +1413,7 @@ def export_customer_segmentation(
     user: UserProfile = Depends(require_authenticated_user),
 ) -> Response:
     record = get_dataset(dataset_id, user.id)
-    result = segment_customers(record.frame, infer_schema(record.frame))
+    result = segment_customers(record.frame, schema_for(record))
     if not result.available:
         raise HTTPException(status_code=422, detail="Customer RFM export needs a usable customer, date, and revenue mapping.")
 
@@ -666,7 +1467,7 @@ def forecast(payload: ForecastRequest, user: UserProfile = Depends(require_authe
     record = get_dataset(payload.dataset_id, user.id)
     result = forecast_dataset(
         record.frame,
-        infer_schema(record.frame),
+        schema_for(record),
         metric_role=payload.metric_role,
         frequency=payload.frequency,
         periods=payload.periods,
@@ -749,7 +1550,7 @@ def filter_export_frame(
     if not date_from and not date_to:
         return record.frame, {}
 
-    schema = infer_schema(record.frame)
+    schema = schema_for(record)
     date_column = record.mapping.get("order_date") or schema.role_column("date") or (schema.dates[0] if schema.dates else None)
     if not date_column or date_column not in record.frame.columns:
         raise HTTPException(status_code=422, detail="A date column is required to apply a report date range.")

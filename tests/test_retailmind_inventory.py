@@ -103,3 +103,20 @@ def test_inventory_methods_and_exports(sales_with_stock_df: pd.DataFrame):
     excel_bytes = res_ma.to_excel_bytes()
     assert isinstance(excel_bytes, bytes)
     assert len(excel_bytes) > 0
+
+
+def test_inventory_flags_overstock_from_excess_days_of_cover():
+    frame = pd.DataFrame({
+        "product_name": ["Slow Mover"] * 30,
+        "order_date": pd.date_range("2025-01-01", periods=30, freq="D"),
+        "quantity": [1] * 30,
+        "current_stock": [500] * 30,
+    })
+    schema = infer_schema(frame)
+    res = build_inventory_recommendations(frame, schema)
+    assert res.available
+    assert res.stock_available
+    row = res.table.iloc[0]
+    assert row["status"] == "Overstock — review cover"
+    assert row["suggested_reorder_quantity"] == 0
+    assert any("Overstock is flagged" in assumption for assumption in res.assumptions)

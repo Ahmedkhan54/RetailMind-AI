@@ -54,14 +54,30 @@ def _safe_profile(user: UserProfile) -> dict:
     return asdict(user)
 
 
+def _cookie_secure() -> bool:
+    """Honour an explicit override, then known HTTPS deployments.
+
+    Never force Secure on plain HTTP (for example localhost) or the browser will
+    silently drop the session cookie. Production HTTPS environments should set
+    RETAILMIND_COOKIE_SECURE=true.
+    """
+    explicit = os.getenv("RETAILMIND_COOKIE_SECURE", "").strip().lower()
+    if explicit in {"1", "true", "yes", "on"}:
+        return True
+    if explicit in {"0", "false", "no", "off"}:
+        return False
+    if os.getenv("VERCEL_ENV") in {"production", "preview"}:
+        return True
+    return os.getenv("RETAILMIND_PUBLIC_ORIGIN", "").strip().lower().startswith("https://")
+
+
 def _set_session_cookie(response: Response, session_id: str, secret: str) -> None:
-    secure = os.getenv("VERCEL_ENV") in {"production", "preview"} or os.getenv("RETAILMIND_COOKIE_SECURE", "").lower() == "true"
     response.set_cookie(
         key=COOKIE_NAME,
         value=f"{session_id}.{secret}",
         max_age=SESSION_LIFETIME_SECONDS,
         httponly=True,
-        secure=secure,
+        secure=_cookie_secure(),
         samesite="lax",
         path="/",
     )
