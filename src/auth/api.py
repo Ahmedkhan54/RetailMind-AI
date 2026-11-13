@@ -1,13 +1,15 @@
 """FastAPI routes for the existing MySQL-backed RetailMind account services."""
 from __future__ import annotations
-
+from pathlib import Path
 from dataclasses import asdict
 from datetime import date
 import json
 import os
+from threading import Lock
 from typing import Any, Literal
 
 import mysql.connector
+from mysql.connector.pooling import MySQLConnectionPool
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 
@@ -15,9 +17,19 @@ from .service import AuthService, AuthenticationError, UserProfile
 
 COOKIE_NAME = "retailmind_session"
 SESSION_LIFETIME_SECONDS = 8 * 60 * 60
+_POOL: MySQLConnectionPool | None = None
+_POOL_LOCK = Lock()
 
 
 def database_connection():
+    """Check out a pooled MySQL connection for one short request.
+
+    A fresh TLS-authenticated connection for every query dominated request
+    latency (especially against TiDB Cloud). The pool keeps a small bounded
+    set of reusable connections; callers still close them in `finally`, which
+    returns them to the pool instead of dropping the socket.
+    """
+    global _POOL
     required = ("MYSQL_HOST", "MYSQL_PORT", "MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DATABASE")
     if any(not os.getenv(name) for name in required):
         raise AuthenticationError("MySQL connection settings are unavailable.")
@@ -26,14 +38,53 @@ def database_connection():
         port = int(os.environ["MYSQL_PORT"])
     except ValueError as error:
         raise AuthenticationError("MySQL connection settings are unavailable.") from error
-    return mysql.connector.connect(
-        host=os.environ["MYSQL_HOST"],
-        port=port,
-        user=os.environ["MYSQL_USER"],
-        password=password,
-        database=os.environ["MYSQL_DATABASE"],
-        connection_timeout=8,
-    )
+    host = os.environ["MYSQL_HOST"]
+    connection_options = {
+        "host": host,
+        "port": port,
+        "user": os.environ["MYSQL_USER"],
+        "password": password,
+        "database": os.environ["MYSQL_DATABASE"],
+        "connection_timeout": 15,
+    }
+
+    # TiDB Cloud requires TLS. Local MySQL development can remain non-TLS.
+    if host not in {"localhost", "127.0.0.1", "::1"}:
+        ssl_ca = os.getenv("MYSQL_SSL_CA")
+        if not ssl_ca:
+            project_root = Path(__file__).resolve().parents[2]
+            default_ca = project_root / "certs" / "tidb-ca.pem"
+            if default_ca.is_file():
+                ssl_ca = str(default_ca)
+        if not ssl_ca or not Path(ssl_ca).is_file():
+            raise AuthenticationError("MySQL SSL certificate is unavailable.")
+        connection_options.update(
+            ssl_ca=ssl_ca,
+            ssl_verify_cert=True,
+            ssl_verify_identity=True,
+        )
+
+    if _POOL is None:
+        with _POOL_LOCK:
+            if _POOL is None:
+                try:
+                    pool_size = max(1, min(int(os.getenv("RETAILMIND_DB_POOL_SIZE", "5")), 20))
+                except ValueError:
+                    pool_size = 5
+                _POOL = MySQLConnectionPool(
+                    pool_name=f"rm{os.getpid()}",
+                    pool_size=pool_size,
+                    pool_reset_session=True,
+                    **connection_options,
+                )
+    try:
+        connection = _POOL.get_connection()
+        # A pooled socket may have been dropped while idle. Validate it before
+        # handing it to a request; reconnect in place instead of failing auth.
+        connection.ping(reconnect=True, attempts=2, delay=0)
+        return connection
+    except mysql.connector.Error as error:
+        raise AuthenticationError("The account database is temporarily unavailable.") from error
 
 
 def auth_service() -> AuthService:

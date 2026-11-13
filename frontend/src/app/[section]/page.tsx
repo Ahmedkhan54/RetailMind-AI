@@ -6,8 +6,6 @@ export function generateStaticParams() {
   return allNavigationItems.map((item) => ({ section: item.href.slice(1) }));
 }
 
-export const dynamic = "force-dynamic";
-
 export default async function WorkspacePage({ params }: { params: Promise<{ section: string }> }) {
   const { section } = await params;
   const item = getNavigationItem(section);

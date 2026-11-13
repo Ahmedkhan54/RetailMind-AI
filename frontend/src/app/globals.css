@@ -47,7 +47,7 @@
 }
 
 :root {
-  --font-geist-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --font-geist-sans: var(--font-inter), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
   --font-geist-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   --background: #f7f8fb;
   --foreground: #1d2939;
@@ -99,7 +99,7 @@ button[aria-label="Next.js Devtools"],
 
 @layer base {
   * { @apply border-border outline-ring/50; }
-  html { @apply font-sans; min-width: 320px; }
+  html { @apply font-sans; -webkit-text-size-adjust: 100%; }
   body { @apply bg-background text-foreground; min-height: 100vh; font-family: var(--font-geist-sans), sans-serif; }
   button:not(:disabled), [role="button"]:not([aria-disabled="true"]) { cursor: pointer; }
   a { color: inherit; text-decoration: none; }
@@ -1213,4 +1213,70 @@ body { font-size: var(--rm-text-base); }
   .tag-mix-count { grid-column: 2; text-align: left; }
   .segment-mix-head { flex-direction: column; align-items: flex-start; }
   .workspace-content { padding-inline: 14px; }
+}
+
+/* ---- Production readability scale (final cascade) ----
+   The original surface used 8-10px chrome text, which is below a comfortable
+   desktop reading size and becomes illegible on phones. These values keep the
+   dense analytics layout while enforcing a consistent minimum type scale. */
+body { font-size: 14px; line-height: 1.55; }
+.brand-name { font-size: 17px; }
+.brand-name span { font-size: 10px; }
+.navigation-label { font-size: 10px; letter-spacing: 0.1em; }
+.navigation-link { min-height: 36px; font-size: 12px; padding: 8px 10px; }
+.navigation-link svg { width: 16px; height: 16px; }
+.sidebar-footer strong { font-size: 11px; }
+.sidebar-footer span:not(.avatar-small) { font-size: 10px; }
+.breadcrumb, .global-search { font-size: 12px; }
+.search-result { font-size: 12px; }
+.search-result small { font-size: 10px; }
+.profile-button { font-size: 12px; }
+.page-description { font-size: 13px; line-height: 1.6; }
+.page-heading-row > div { min-width: 0; }
+.page-description, .page-description strong { overflow-wrap: anywhere; }
+.workspace-content { min-width: 0; }
+[data-slot="badge"] { max-width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
+.recharts-responsive-container { min-width: 0; overflow: hidden; }
+.connected-chart, .analytics-chart { min-width: 0; }
+.heading-kicker { font-size: 11px; }
+.eyebrow { font-size: 10px; }
+.status-badge { font-size: 10px; }
+.action-button, .connection-link, .panel-link, .text-action, .insight-link, .report-detail-link { font-size: 11px; }
+.metric-label { font-size: 12px; }
+.metric-footnote { font-size: 10px; line-height: 1.4; }
+.panel-title { font-size: 14px !important; }
+.panel-subtitle { font-size: 11px; line-height: 1.5; }
+.connection-copy strong { font-size: 12px; }
+.connection-copy span { font-size: 11px; }
+.ranked-row, .ranked-row strong { font-size: 12px; }
+.rank-number { font-size: 10px; }
+.info-card strong { font-size: 12px; }
+.info-card p { font-size: 11px; }
+.feature-empty h3 { font-size: 14px; }
+.feature-empty p { font-size: 12px; }
+.feature-list p { font-size: 12px; }
+.compact-field, .analytics-date-field, .goal-field, .mapping-field, .scenario-slider { font-size: 11px; }
+.compact-field select, .analytics-date-field [data-slot="input"], .goal-field [data-slot="input"], .mapping-field select, .preferences-form select { font-size: 12px; }
+.feature-chart-blank, .table-empty { font-size: 12px; }
+.workspace-footer { font-size: 10px; }
+.login-field label, .login-mode-toggle button { font-size: 12px; }
+.login-field label span { font-size: 11px; }
+.login-heading > p:last-child { font-size: 12px; }
+.login-submit { font-size: 13px; }
+.login-assurance { font-size: 11px; }
+.login-access-note, .login-footer { font-size: 10px; }
+.assistant-welcome p, .assistant-note, .assistant-composer-label { font-size: 11px; }
+.assistant-composer input, .assistant-composer button { font-size: 12px; }
+.suggestion-chip { font-size: 11px; }
+.recharts-cartesian-axis-tick text { font-size: 10px; }
+.recharts-legend-item-text { font-size: 11px; }
+
+@media (max-width: 640px) {
+  .page-description { font-size: 12px; }
+  .metric-label { font-size: 11px; }
+  .metric-footnote { font-size: 10px; }
+  .panel-title { font-size: 13px !important; }
+  .panel-subtitle { font-size: 11px; }
+  .workspace-footer { font-size: 10px; }
 }

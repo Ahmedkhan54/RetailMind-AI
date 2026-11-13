@@ -350,7 +350,7 @@ class AuthService:
         connection = self._connection_factory(); cursor = connection.cursor(dictionary=True)
         try:
             cursor.execute(
-                "SELECT u.id, u.email, u.full_name, u.phone, u.account_status, u.session_version, u.created_at, u.last_login_at, s.expires_at, s.revoked_at, s.session_version AS stored_session_version FROM user_sessions s INNER JOIN users u ON u.id = s.user_id WHERE s.id = %s AND s.session_secret_hash = %s",
+                "SELECT u.id, u.email, u.full_name, u.phone, u.account_status, u.session_version, u.created_at, u.last_login_at, s.expires_at, s.revoked_at, s.last_activity_at, s.session_version AS stored_session_version FROM user_sessions s INNER JOIN users u ON u.id = s.user_id WHERE s.id = %s AND s.session_secret_hash = %s",
                 (session_id, secret_hash),
             )
             row = cursor.fetchone()
@@ -367,8 +367,14 @@ class AuthService:
                 self._audit(cursor, row["id"], "session_expired", "info")
                 connection.commit()
                 raise AuthenticationError("Session has expired. Please sign in again.")
-            cursor.execute("UPDATE user_sessions SET last_activity_at = CURRENT_TIMESTAMP WHERE id = %s", (session_id,))
-            connection.commit()
+            # `last_activity_at` is diagnostic only. Writing it on every API call
+            # creates a database write per request, so record it at most once a
+            # minute while still verifying expiry and revocation every time.
+            now = datetime.now(timezone.utc)
+            last_activity = row.get("last_activity_at")
+            if not isinstance(last_activity, datetime) or (now.replace(tzinfo=None) - last_activity).total_seconds() >= 60:
+                cursor.execute("UPDATE user_sessions SET last_activity_at = CURRENT_TIMESTAMP WHERE id = %s", (session_id,))
+                connection.commit()
             return self._profile(row)
         except AuthenticationError:
             connection.rollback(); raise

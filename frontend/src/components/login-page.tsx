@@ -48,7 +48,6 @@ export function LoginPage({ redirectTo }: { redirectTo: string }) {
       resetDatasetSelection();
       await mutate("/api/retailmind/auth/session", payload, { revalidate: false });
       router.replace(redirectTo);
-      router.refresh();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Authentication could not be completed.");
     } finally {

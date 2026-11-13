@@ -151,7 +151,6 @@ export function AppShell({ children, currentHref, currentLabel }: { children: Re
       setDataset(null);
       await mutate("/api/retailmind/auth/session", null, { revalidate: false });
       router.replace("/login");
-      router.refresh();
     } catch (error) {
       setLogoutError(error instanceof Error ? error.message : "Could not sign out. Try again.");
     } finally {

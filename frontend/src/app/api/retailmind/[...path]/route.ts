@@ -25,7 +25,7 @@ async function proxyRequest(request: Request, context: RouteContext) {
       signal: AbortSignal.timeout(60000),
     });
     const responseHeaders = new Headers();
-    for (const header of ["content-type", "content-disposition", "cache-control", "set-cookie", "x-cleaning-report"]) {
+    for (const header of ["content-type", "content-disposition", "cache-control", "set-cookie", "x-cleaning-report", "server-timing"]) {
       const value = response.headers.get(header);
       if (value) responseHeaders.set(header, value);
     }

@@ -96,6 +96,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
     fetchJson,
     {
       revalidateOnFocus: true,
+      dedupingInterval: 60000,
       // One short retry smooths over a cold backend without masking a real outage.
       shouldRetryOnError: true,
       errorRetryCount: 1,
@@ -105,7 +106,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
   const { data: datasetIndex, isLoading: datasetsLoading, mutate: refreshDatasets } = useSWR<{ datasets: DatasetSummary[] }>(
     session ? "/api/retailmind/datasets" : null,
     fetchJson,
-    { revalidateOnFocus: true, shouldRetryOnError: false },
+    { revalidateOnFocus: false, dedupingInterval: 30000, keepPreviousData: true, shouldRetryOnError: false },
   );
   const [datasetOverride, setDatasetOverride] = useState<ActiveDataset | null | undefined>(undefined);
   const defaultDatasetId = datasetOverride === undefined ? datasetIndex?.datasets[0]?.id : undefined;
@@ -122,7 +123,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
   }>(
     session && defaultDatasetId ? `/api/retailmind/datasets/${encodeURIComponent(defaultDatasetId)}` : null,
     fetchJson,
-    { revalidateOnFocus: true, shouldRetryOnError: false },
+    { revalidateOnFocus: false, dedupingInterval: 30000, keepPreviousData: true, shouldRetryOnError: false },
   );
 
   const datasetValue = useMemo(() => {

@@ -27,7 +27,7 @@ import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
-import { useDataset } from "@/components/providers";
+import { fetchJson, useDataset } from "@/components/providers";
 import { DashboardPage } from "@/components/dashboard-page";
 
 type Overview = {
@@ -44,13 +44,6 @@ type Overview = {
   recent_transactions: { order_id: string; order_date: string; product_name: string; city: string; sales: number; profit: number }[];
   insights: string[];
 };
-
-async function fetchOverview(url: string): Promise<Overview> {
-  const response = await fetch(url, { cache: "no-store" });
-  const payload = await response.json();
-  if (!response.ok) throw new Error(payload.detail || "Could not load this dataset.");
-  return payload as Overview;
-}
 
 const metricCards = [
   { label: "Total sales", key: "total_sales", icon: BarChart3 },
@@ -247,7 +240,7 @@ export function DashboardRuntime() {
   const endpoint = dataset
     ? `/api/retailmind/dashboard/overview/${encodeURIComponent(dataset.id)}${query ? `?${query}` : ""}`
     : null;
-  const { data, error, isLoading } = useSWR<Overview>(endpoint, fetchOverview);
+  const { data, error, isLoading } = useSWR<Overview>(endpoint, fetchJson);
 
   if (!dataset) return <DashboardPage />;
   if (mode === "custom") return <CustomizeDashboard key={dataset.id} datasetId={dataset.id} datasetName={dataset.filename} onModeChange={changeMode} />;

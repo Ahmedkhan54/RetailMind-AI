@@ -8,19 +8,22 @@ MySQL and filesystem services; parsed frames are cached in process memory.
 from __future__ import annotations
 
 from collections import OrderedDict
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 import json
 import math
 import os
 import secrets
+import time
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
 import pandas as pd
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Response, UploadFile
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from starlette.middleware.gzip import GZipMiddleware
 
 from analytics import build_insights, calculate_kpis, grouped_performance, monthly_summary, prepare_data, safe_ratio
 from retailmind.alerts import Alert, NotificationPreferences, SEVERITY_ORDER, detect_alerts, send_alert_digest, send_alert_email, send_test_email
@@ -39,7 +42,7 @@ from retailmind.schema import infer_schema
 from src.analytics.enterprise import scenario_projection
 from src.business.goals import goal_progress
 from threading import RLock
-from src.auth.api import auth_service, require_authenticated_user, router as account_router
+from src.auth.api import auth_service, database_connection, require_authenticated_user, router as account_router
 from src.auth.service import AuthenticationError, UserProfile
 from src.storage.uploads import UploadStorage, UploadStorageError
 
@@ -56,6 +59,16 @@ class DatasetRecord:
     mapping: dict[str, str | None]
     created_at: Any | None = None
     schema: Any | None = None
+    # Derived data is immutable for a given mapping. Caching it avoids reparsing
+    # and re-normalising the same rows for every dashboard/analytics request.
+    canonical: pd.DataFrame | None = None
+    canonical_mapping_key: tuple[tuple[str, str | None], ...] | None = None
+    inventory_cache: dict[tuple[Any, ...], Any] = field(default_factory=dict)
+    detail_metadata: dict[str, Any] | None = None
+    visual_cache: dict[tuple[Any, ...], dict[str, Any]] = field(default_factory=dict)
+    segmentation_cache: dict[int | None, Any] = field(default_factory=dict)
+    cleaning_metadata: dict[str, Any] | None = None
+    overview_cache: dict[tuple[Any, ...], dict[str, Any]] = field(default_factory=dict)
 
 
 DATASETS: OrderedDict[str, DatasetRecord] = OrderedDict()
@@ -64,6 +77,19 @@ RAG_LOCK = RLock()
 API_TOKEN = os.environ.get("RETAILMIND_API_TOKEN")
 app = FastAPI(title="RetailMind AI Python API", version="0.1.0")
 app.include_router(account_router)
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+
+@app.middleware("http")
+async def response_diagnostics(request, call_next):
+    """Expose server timing and keep account-scoped responses out of caches."""
+    started = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    response.headers["Server-Timing"] = f"app;dur={elapsed_ms:.1f}"
+    if request.url.path.startswith("/api/") and request.url.path not in {"/api/health", "/api/ready"}:
+        response.headers["Cache-Control"] = "private, no-store"
+    return response
 
 
 def require_api_token(authorization: str | None = Header(default=None)) -> None:
@@ -119,11 +145,17 @@ def canonical_frame(record: DatasetRecord) -> pd.DataFrame | None:
     required = {"order_id", "order_date", "category", "product_name", "city", "sales", "profit"}
     if not required.issubset({key for key, value in record.mapping.items() if value}):
         return None
+    mapping_key = tuple(sorted((key, value) for key, value in record.mapping.items() if value))
+    if record.canonical is not None and record.canonical_mapping_key == mapping_key:
+        return record.canonical
     renamed = record.frame.rename(columns={source: target for target, source in record.mapping.items() if source})
     try:
-        return prepare_data(renamed)
+        prepared = prepare_data(renamed)
     except (KeyError, ValueError):
         return None
+    record.canonical = prepared
+    record.canonical_mapping_key = mapping_key
+    return prepared
 
 
 def rows_for_dimension(frame: pd.DataFrame | None, dimension: str) -> list[dict[str, Any]]:
@@ -135,6 +167,51 @@ def rows_for_dimension(frame: pd.DataFrame | None, dimension: str) -> list[dict[
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     return {"status": "ok", "service": "retailmind-python", "storage": "MySQL metadata + user-scoped files", "datasets": len(DATASETS)}
+
+
+@app.get("/api/ready")
+def readiness() -> JSONResponse:
+    """Readiness probe that verifies the database path without leaking details.
+
+    This endpoint is intentionally unauthenticated for load balancers, but it
+    performs a real check of the configured MySQL/TiDB connection. The response
+    never includes the host, user, password, CA path, or exception text.
+    """
+    connection = None
+    cursor = None
+    headers = {"Cache-Control": "no-store", "Pragma": "no-cache"}
+    try:
+        connection = database_connection()
+        cursor = connection.cursor()
+        cursor.execute("SELECT 1")
+        if cursor.fetchone() is None:
+            raise RuntimeError("The database readiness query returned no row.")
+    except Exception:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "unavailable",
+                "service": "retailmind-python",
+                "database": "unreachable",
+                "message": "Database readiness check failed.",
+            },
+            headers={**headers, "Retry-After": "5"},
+        )
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+    return JSONResponse(
+        content={"status": "ready", "service": "retailmind-python", "database": "reachable", "datasets": len(DATASETS)},
+        headers=headers,
+    )
 
 
 @app.get("/api/datasets", dependencies=[Depends(require_api_token)])
@@ -170,22 +247,26 @@ def upload_history(user: UserProfile = Depends(require_authenticated_user)) -> d
 @app.get("/api/datasets/{dataset_id}", dependencies=[Depends(require_api_token)])
 def dataset_detail(dataset_id: str, user: UserProfile = Depends(require_authenticated_user)) -> dict[str, Any]:
     record = get_dataset(dataset_id, user.id)
-    missing = record.frame.isna().sum()
+    if record.detail_metadata is None:
+        missing = record.frame.isna().sum()
+        record.detail_metadata = {
+            "dataset_id": dataset_id,
+            "filename": record.filename,
+            "created_at": record.created_at,
+            "row_count": int(len(record.frame)),
+            "column_count": int(len(record.frame.columns)),
+            "columns": [str(column) for column in record.frame.columns],
+            "preview": json_records(record.frame.head(5)),
+            "profile": profile_schema(record.frame),
+            "quality": {
+                "missing_cells": int(missing.sum()),
+                "columns_with_missing_values": int((missing > 0).sum()),
+                "duplicate_rows": int(record.frame.duplicated().sum()),
+            },
+        }
     return {
-        "dataset_id": dataset_id,
-        "filename": record.filename,
-        "created_at": record.created_at,
-        "row_count": int(len(record.frame)),
-        "column_count": int(len(record.frame.columns)),
-        "columns": [str(column) for column in record.frame.columns],
-        "preview": json_records(record.frame.head(5)),
+        **record.detail_metadata,
         "mapping": record.mapping,
-        "profile": profile_schema(record.frame),
-        "quality": {
-            "missing_cells": int(missing.sum()),
-            "columns_with_missing_values": int((missing > 0).sum()),
-            "duplicate_rows": int(record.frame.duplicated().sum()),
-        },
     }
 
 
@@ -228,17 +309,19 @@ def dataset_cleaning_review(
     user: UserProfile = Depends(require_authenticated_user),
 ) -> dict[str, Any]:
     record = get_dataset(dataset_id, user.id)
-    schema = schema_for(record)
-    cleaned, report = apply_cleaning(record.frame, schema)
-    return {
-        "columns": [str(column) for column in record.frame.columns],
-        "domain_label": schema.domain_label,
-        "options": DEFAULT_OPTIONS,
-        "suggestions": [suggestion.to_dict() for suggestion in analyse_cleaning(record.frame, schema)],
-        "preview": json_records(cleaned.head(5)),
-        "report": report.to_dict(),
-        "original_preserved": True,
-    }
+    if record.cleaning_metadata is None:
+        schema = schema_for(record)
+        cleaned, report = apply_cleaning(record.frame, schema)
+        record.cleaning_metadata = {
+            "columns": [str(column) for column in record.frame.columns],
+            "domain_label": schema.domain_label,
+            "options": DEFAULT_OPTIONS,
+            "suggestions": [suggestion.to_dict() for suggestion in analyse_cleaning(record.frame, schema)],
+            "preview": json_records(cleaned.head(5)),
+            "report": report.to_dict(),
+            "original_preserved": True,
+        }
+    return record.cleaning_metadata
 
 
 @app.post("/api/datasets/{dataset_id}/cleaning", dependencies=[Depends(require_api_token)])
@@ -398,6 +481,14 @@ def dashboard_overview(
     date_to: date | None = Query(default=None),
 ) -> dict[str, Any]:
     record = get_dataset(dataset_id, user.id)
+    cache_key = (
+        tuple(sorted((key, value) for key, value in record.mapping.items() if value)),
+        date_from.isoformat() if date_from else None,
+        date_to.isoformat() if date_to else None,
+    )
+    cached = record.overview_cache.get(cache_key)
+    if cached is not None:
+        return cached
     source_frame, _filters = filter_export_frame(record, date_from, date_to)
     filtered_record = DatasetRecord(
         owner_id=record.owner_id,
@@ -439,7 +530,7 @@ def dashboard_overview(
     cities = rows_for_dimension(frame, "city")
     transaction_columns = [column for column in ("order_id", "order_date", "product_name", "city", "sales", "profit") if column in frame]
     transactions = frame.sort_values("order_date", ascending=False).loc[:, transaction_columns].head(8)
-    return {
+    payload = {
         "dataset_id": dataset_id,
         "dataset_name": record.filename,
         "available": True,
@@ -453,6 +544,10 @@ def dashboard_overview(
         "recent_transactions": json_records(transactions),
         "insights": build_insights(frame, {"sales_change": None}, dimensions={"category", "product_name"}),
     }
+    if len(record.overview_cache) >= 8:
+        record.overview_cache.pop(next(iter(record.overview_cache)))
+    record.overview_cache[cache_key] = payload
+    return payload
 
 
 class ChatRequest(BaseModel):
@@ -907,6 +1002,17 @@ def visual_analytics(
     dashboard and analytics endpoints. No chart-specific sample data is added.
     """
     record = get_dataset(dataset_id, user.id)
+    cache_key = (
+        tuple(sorted((key, value) for key, value in record.mapping.items() if value)),
+        date_from.isoformat() if date_from else None,
+        date_to.isoformat() if date_to else None,
+        (category or "").casefold(),
+        (city or "").casefold(),
+        (region or "").casefold(),
+    )
+    cached = record.visual_cache.get(cache_key)
+    if cached is not None:
+        return cached
     source_frame, _filters = filter_export_frame(record, date_from, date_to)
     filtered_record = DatasetRecord(
         owner_id=record.owner_id,
@@ -967,7 +1073,7 @@ def visual_analytics(
         kpis[key] = int(frame[column].nunique(dropna=True)) if column else None
     overall_margin = kpis.get("profit_margin") if isinstance(kpis.get("profit_margin"), (int, float)) else None
 
-    return {
+    payload = {
         "available": True,
         "dataset_id": dataset_id,
         "dataset_name": record.filename,
@@ -1028,6 +1134,10 @@ def visual_analytics(
             if note
         ],
     }
+    if len(record.visual_cache) >= 8:
+        record.visual_cache.pop(next(iter(record.visual_cache)))
+    record.visual_cache[cache_key] = payload
+    return payload
 
 
 @app.get("/api/ai/insights/{dataset_id}", dependencies=[Depends(require_api_token)])
@@ -1369,7 +1479,12 @@ def customer_segmentation(
     if sort not in {"monetary", "recency", "frequency", "customer"}:
         sort = "monetary"
     record = get_dataset(dataset_id, user.id)
-    result = segment_customers(record.frame, schema_for(record), clusters=clusters)
+    result = record.segmentation_cache.get(clusters)
+    if result is None:
+        result = segment_customers(record.frame, schema_for(record), clusters=clusters)
+        if len(record.segmentation_cache) >= 4:
+            record.segmentation_cache.pop(next(iter(record.segmentation_cache)))
+        record.segmentation_cache[clusters] = result
     filtered = result.rfm
     if tag and "customer_tag" in filtered.columns:
         filtered = filtered[filtered["customer_tag"].astype("string").str.casefold() == tag.casefold()]
@@ -1443,8 +1558,18 @@ def inventory_recommendations(
     date_to: date | None = Query(default=None),
 ) -> dict[str, Any]:
     record = get_dataset(dataset_id, user.id)
-    frame, _filters = filter_export_frame(record, date_from, date_to)
-    result = build_inventory_recommendations(frame, infer_schema(frame))
+    cache_key = (
+        tuple(sorted((key, value) for key, value in record.mapping.items() if value)),
+        date_from.isoformat() if date_from else None,
+        date_to.isoformat() if date_to else None,
+    )
+    result = record.inventory_cache.get(cache_key)
+    if result is None:
+        frame, _filters = filter_export_frame(record, date_from, date_to)
+        result = build_inventory_recommendations(frame, infer_schema(frame))
+        if len(record.inventory_cache) >= 8:
+            record.inventory_cache.pop(next(iter(record.inventory_cache)))
+        record.inventory_cache[cache_key] = result
     return {
         "available": result.available,
         "recommendations": json_records(result.table.head(500)),

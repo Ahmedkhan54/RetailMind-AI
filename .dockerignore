@@ -1,0 +1,39 @@
+# Local secrets and runtime state
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+certs/
+var/
+video_frames/
+tmp*
+
+# Python local environment and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Git and editor metadata
+.git/
+.gitignore
+.dockerignore
+.cursor/
+
+# Frontend build output is deployed separately to Netlify
+frontend/
+node_modules/
+
+# Local archives and database backups
+*.zip
+*.dump
+*.sql.gz
+*.bak
+*.bak.sql
+*.backup
+sql/backups/
+
+# Tests and local diagnostics
+tests/
+diag_streamlit.*

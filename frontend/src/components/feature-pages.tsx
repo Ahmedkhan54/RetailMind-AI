@@ -8,10 +8,8 @@ import { formatCompactCurrency, formatCurrency, formatCurrencyPrecise, formatDat
 import useSWR, { useSWRConfig } from "swr";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import dynamic from "next/dynamic";
 import { useDataset, useSession, type ActiveDataset } from "@/components/providers";
-import { VisualAnalyticsPage } from "@/components/visual-analytics";
-import { IndiaMapPage } from "@/components/india-map";
-import { CityAnalyticsPage } from "@/components/city-analytics";
 import {
   Activity,
   ArrowRight,
@@ -55,6 +53,24 @@ import {
 } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import type { NavigationItem } from "@/lib/navigation";
+
+function FeatureLoading() {
+  return <div className="loading-panel" aria-live="polite" aria-busy="true" />;
+}
+
+// Expensive visual modules load only on the routes that use them.
+const VisualAnalyticsPage = dynamic(
+  () => import("@/components/visual-analytics").then((module) => module.VisualAnalyticsPage),
+  { ssr: false, loading: FeatureLoading },
+);
+const IndiaMapPage = dynamic(
+  () => import("@/components/india-map").then((module) => module.IndiaMapPage),
+  { ssr: false, loading: FeatureLoading },
+);
+const CityAnalyticsPage = dynamic(
+  () => import("@/components/city-analytics").then((module) => module.CityAnalyticsPage),
+  { ssr: false, loading: FeatureLoading },
+);
 
 function PageHeading({ item }: { item: NavigationItem }) {
   const Icon = item.icon;

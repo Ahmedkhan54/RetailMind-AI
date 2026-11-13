@@ -40,3 +40,12 @@ Thumbs.db
 # RetailMind user data
 var/user_uploads/
 video_frames/
+certs/
+
+# Database backups; keep migration files under sql/ trackable
+*.dump
+*.sql.gz
+*.bak
+*.bak.sql
+*.backup
+sql/backups/

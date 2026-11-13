@@ -73,10 +73,22 @@ export function visualEndpoint(datasetId: string, filters: VisualFilters): strin
 }
 
 export async function fetchVisuals(url: string): Promise<VisualPayload> {
-  const response = await fetch(url, { cache: "no-store" });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.detail || "Could not load visual analytics.");
-  return payload as VisualPayload;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  try {
+    const response = await fetch(url, { cache: "no-store", signal: controller.signal });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || "Could not load visual analytics.");
+    return payload as VisualPayload;
+  } catch (reason) {
+    if (reason instanceof DOMException && reason.name === "AbortError") {
+      throw new Error("Visual analytics took too long to respond. Please retry.");
+    }
+    throw reason;
+  }
+  finally {
+    clearTimeout(timer);
+  }
 }
 
 export function downloadRowsCsv(filename: string, rows: Record<string, unknown>[]) {
