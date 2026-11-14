@@ -19,6 +19,10 @@ from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
+# Import the Excel engine during process startup. Pandas imports it lazily on
+# the first .xlsx read, which otherwise adds ~400 ms to the first dataset load.
+import openpyxl  # noqa: F401
+
 import pandas as pd
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Response, UploadFile
 from fastapi.responses import JSONResponse
@@ -1141,13 +1145,45 @@ def visual_analytics(
 
 
 @app.get("/api/ai/insights/{dataset_id}", dependencies=[Depends(require_api_token)])
-def business_insights(dataset_id: str, user: UserProfile = Depends(require_authenticated_user)) -> dict[str, Any]:
+def business_insights(
+    dataset_id: str,
+    user: UserProfile = Depends(require_authenticated_user),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+) -> dict[str, Any]:
+    """Calculate business insights with optional date filtering.
+
+    Date filters are applied before insight calculation to ensure insights
+    reflect only the selected time period, consistent with other analytics endpoints.
+    """
     record = get_dataset(dataset_id, user.id)
-    frame = canonical_frame(record)
+    source_frame, _filters = filter_export_frame(record, date_from, date_to)
+    filtered_record = DatasetRecord(
+        owner_id=record.owner_id,
+        filename=record.filename,
+        frame=source_frame,
+        mapping=record.mapping,
+        created_at=record.created_at,
+    )
+    frame = canonical_frame(filtered_record)
     if frame is None:
-        return {"available": False, "insights": [], "notes": ["Map the required retail columns to calculate business insights."]}
+        return {
+            "available": False,
+            "insights": [],
+            "notes": ["Map the required retail columns to calculate business insights."],
+            "row_count": int(len(source_frame)),
+        }
     insights = build_insights(frame, {"sales_change": None}, dimensions={"category", "product_name"})
-    return {"available": True, "insights": insights, "notes": []}
+    return {
+        "available": True,
+        "insights": insights,
+        "notes": [],
+        "row_count": int(len(frame)),
+        "date_filtered": {
+            "date_from": date_from.isoformat() if date_from else None,
+            "date_to": date_to.isoformat() if date_to else None,
+        },
+    }
 
 
 ALERT_STATE_LOCK = RLock()
@@ -1404,6 +1440,67 @@ def business_alerts(dataset_id: str, user: UserProfile = Depends(require_authent
         "severity_counts": {label: sum(1 for row in rows if row.get("severity_label") == label) for label in ("Critical", "High", "Medium")},
         "email": email_status,
     }
+
+
+@app.get("/api/ai/alerts/{dataset_id}/export", dependencies=[Depends(require_api_token)])
+def export_alerts_csv(
+    dataset_id: str,
+    user: UserProfile = Depends(require_authenticated_user),
+    severity: str | None = Query(default=None, max_length=20),
+    status_filter: str | None = Query(default=None, max_length=20),
+) -> Response:
+    """Export alerts as CSV with user isolation.
+
+    Only returns alerts belonging to the authenticated user.
+    Supports filtering by severity and status.
+    """
+    record = get_dataset(dataset_id, user.id)
+    alerts = detect_alerts(record.frame, schema_for(record))
+    rows = merged_alert_rows(user.id, dataset_id, alerts)
+
+    # Apply filters
+    if severity:
+        severity_label = SEVERITY_LABELS.get(severity.lower(), severity)
+        rows = [row for row in rows if row.get("severity_label") == severity_label]
+    if status_filter:
+        rows = [row for row in rows if row.get("status") == status_filter]
+
+    # Build CSV content
+    if not rows:
+        csv_content = "title,severity,type,affected_entity,current_value,previous_value,percentage_change,status,timestamp\n"
+    else:
+        import csv
+        import io
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow([
+            "title", "severity", "type", "affected_entity",
+            "current_value", "previous_value", "percentage_change",
+            "status", "timestamp"
+        ])
+        for row in rows:
+            writer.writerow([
+                row.get("title", ""),
+                row.get("severity_label", ""),
+                row.get("alert_type", ""),
+                row.get("affected_entity", ""),
+                row.get("current_value", ""),
+                row.get("previous_value", ""),
+                row.get("percentage_change", ""),
+                row.get("status", ""),
+                row.get("timestamp", ""),
+            ])
+        csv_content = output.getvalue()
+
+    stem = "".join(character for character in os.path.splitext(os.path.basename(record.filename))[0] if character.isalnum() or character in "-_").strip("-_") or "alerts"
+    return Response(
+        content=csv_content.encode("utf-8-sig"),
+        media_type="text/csv; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="{stem}-alerts.csv"',
+            "X-Alerts-Count": str(len(rows)),
+        },
+    )
 
 
 class AlertStatusRequest(BaseModel):

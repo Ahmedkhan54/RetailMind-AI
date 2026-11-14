@@ -13,7 +13,7 @@ import {
 import { useChartAnimation } from "@/lib/animation-preference";
 import { formatCompactCurrency, formatCurrency, formatPercent } from "@/lib/format";
 
-const DONUT_COLORS = ["#173b73", "#2f65a7", "#4b83d5", "#8fb4e8", "#a6c4f1", "#d9a41a", "#6f83a2", "#c7d5e8"];
+const DONUT_COLORS = ["#15513b", "#2f7d5a", "#5aa878", "#8cc79d", "#b9dfc1", "#c8f169", "#86a995", "#d9e7dc"];
 
 type CategoryRow = { category: string; sales: number };
 
@@ -177,8 +177,8 @@ export function KpiSparkline({
   const gradientId = useId().replace(/:/g, "");
   const series = data.filter((row) => Number.isFinite(row[dataKey]));
   if (series.length < 2) return null;
-  const stroke = variant === "emphasis" ? "#d7e6fb" : "#4b83d5";
-  const fill = variant === "emphasis" ? "#ffffff" : "#4b83d5";
+  const stroke = variant === "emphasis" ? "#c8f169" : "#2f7d5a";
+  const fill = variant === "emphasis" ? "#c8f169" : "#2f7d5a";
 
   return (
     <div className="kpi-sparkline" aria-hidden="true">

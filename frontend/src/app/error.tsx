@@ -8,7 +8,7 @@ export default function WorkspaceError({ reset }: { error: Error & { digest?: st
   return (
     <main className="auth-loading auth-loading-error" role="alert">
       <CircleAlert aria-hidden="true" style={{ width: 24, height: 24, margin: "0 auto" }} />
-      <h1 style={{ fontSize: 18, fontWeight: 650 }}>This page could not be displayed</h1>
+      <h1 style={{ fontSize: 18, fontWeight: 600 }}>This page could not be displayed</h1>
       <p>The workspace hit an unexpected error. Your account and uploaded data are unchanged.</p>
       <div className="auth-loading-actions">
         <Button type="button" variant="outline" size="sm" onClick={reset}>Retry this page</Button>

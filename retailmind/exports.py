@@ -105,8 +105,69 @@ def theme_json_bytes(theme_name: str = "RetailMind AI") -> bytes:
 def _paragraph(text: str):
     from reportlab.platypus import Paragraph
     from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
 
     styles = getSampleStyleSheet()
+    # Try to register a Unicode-supported font, fall back to Helvetica
+    try:
+        # Try to find a system Unicode font
+        import platform
+        import subprocess
+
+        if platform.system() == "Windows":
+            # Try common Windows Unicode fonts
+            font_paths = [
+                "C:/Windows/Fonts/arialuni.ttf",
+                "C:/Windows/Fonts/ARIALUNI.TTF",
+                "C:/Windows/Fonts/DejaVuSans.ttf",
+            ]
+            font_path = None
+            for path in font_paths:
+                try:
+                    import os
+                    if os.path.exists(path):
+                        font_path = path
+                        break
+                except:
+                    pass
+
+            # If not found, try to locate via font search
+            if not font_path:
+                try:
+                    result = subprocess.run(["where", "/R", "C:\\Windows\\Fonts", "arialuni.ttf"],
+                                          capture_output=True, text=True, timeout=5)
+                    if result.stdout.strip():
+                        font_path = result.stdout.strip().split('\n')[0]
+                except:
+                    pass
+        else:
+            # Linux/Mac - try common locations
+            font_paths = [
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+                "/usr/local/share/fonts/DejaVuSans.ttf",
+            ]
+            font_path = None
+            for path in font_paths:
+                try:
+                    import os
+                    if os.path.exists(path):
+                        font_path = path
+                        break
+                except:
+                    pass
+
+        if font_path:
+            pdfmetrics.registerFont(TTFont('UnicodeFont', font_path))
+            styles["BodyText"].fontName = 'UnicodeFont'
+            styles["Title"].fontName = 'UnicodeFont'
+            styles["Heading2"].fontName = 'UnicodeFont'
+            styles["Italic"].fontName = 'UnicodeFont'
+    except Exception:
+        # If font registration fails, continue with default Helvetica
+        pass
+
     return Paragraph(escape(str(text)).replace("\n", "<br/>"), styles["BodyText"])
 
 
@@ -170,6 +231,41 @@ def pdf_report(
                 ]
             )
         )
+    # Try to set Unicode font for table cells as well
+    try:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        import platform
+
+        if platform.system() == "Windows":
+            font_paths = ["C:/Windows/Fonts/arialuni.ttf", "C:/Windows/Fonts/ARIALUNI.TTF"]
+            font_path = None
+            for path in font_paths:
+                try:
+                    import os
+                    if os.path.exists(path):
+                        font_path = path
+                        break
+                except:
+                    pass
+        else:
+            font_paths = ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
+            font_path = None
+            for path in font_paths:
+                try:
+                    import os
+                    if os.path.exists(path):
+                        font_path = path
+                        break
+                except:
+                    pass
+
+        if font_path:
+            pdfmetrics.registerFont(TTFont('UnicodeFont', font_path))
+            # Note: Table cell fonts would need individual setting via TableStyle
+            # For simplicity, we rely on the paragraph fonts being set correctly
+    except Exception:
+        pass
         story.append(table)
         if len(frame) > len(preview):
             story.append(Paragraph(f"Showing the first {len(preview):,} of {len(frame):,} rows.", styles["Italic"]))

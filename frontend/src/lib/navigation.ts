@@ -107,7 +107,6 @@ export const navigationGroups: NavigationGroup[] = [
       { label: "Account Settings", href: "/account-settings", icon: Settings2, description: "Manage account-level preferences." },
       { label: "Data Connections", href: "/data-connections", icon: Database, description: "Connect the separate Python analytics service." },
       { label: "Preferences", href: "/preferences", icon: Building2, description: "Choose how your workspace should behave." },
-      { label: "Security", href: "/security", icon: ShieldCheck, description: "Review session and security settings." },
       { label: "Owner Admin", href: "/owner-admin", icon: ShieldCheck, description: "Review account, session, and audit controls." },
     ],
   },

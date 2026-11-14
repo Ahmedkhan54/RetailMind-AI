@@ -684,8 +684,8 @@ function AnalyticsPage({ item }: { item: NavigationItem }) {
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart key={isAnimationActive ? "animated" : "static"} data={chartRows} layout="vertical" margin={{ top: 4, right: 16, left: 4, bottom: 4 }}>
                   <CartesianGrid stroke="#edf0f5" strokeDasharray="3 4" horizontal={false} />
-                  <XAxis type="number" tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 9 }} tickFormatter={(value: number) => new Intl.NumberFormat("en-IN", { notation: "compact", maximumFractionDigits: 1 }).format(value)} />
-                  <YAxis type="category" dataKey="label" width={116} tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 8 }} />
+                  <XAxis type="number" tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} tickFormatter={(value: number) => new Intl.NumberFormat("en-IN", { notation: "compact", maximumFractionDigits: 1 }).format(value)} />
+                  <YAxis type="category" dataKey="label" width={116} tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} />
                   <Tooltip formatter={(value) => ["sales", "revenue", "profit"].includes(String(chartField)) ? formatCurrency(Number(value)) : formatNumber(Number(value))} />
                   <Bar dataKey="value" name={String(chartField).replaceAll("_", " ")} radius={[0, 6, 6, 0]} barSize={14} isAnimationActive={isAnimationActive} animationDuration={animationDuration} animationEasing={animationEasing}>
                     {chartRows.map((row, index) => <Cell key={`${row.label}-${index}`} fill={index % 2 === 0 ? "#3e75bd" : "#a6c4f1"} />)}
@@ -835,8 +835,8 @@ function StockRecommendationsPage({ item }: { item: NavigationItem }) {
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart key={isAnimationActive ? "animated" : "static"} data={chartRows} layout="vertical" margin={{ top: 4, right: 16, left: 4, bottom: 4 }}>
                       <CartesianGrid stroke="#edf0f5" strokeDasharray="3 4" horizontal={false} />
-                      <XAxis type="number" tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 9 }} tickFormatter={(value: number) => new Intl.NumberFormat("en-IN", { notation: "compact", maximumFractionDigits: 1 }).format(value)} />
-                      <YAxis type="category" dataKey="label" width={126} tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 8 }} />
+                      <XAxis type="number" tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} tickFormatter={(value: number) => new Intl.NumberFormat("en-IN", { notation: "compact", maximumFractionDigits: 1 }).format(value)} />
+                      <YAxis type="category" dataKey="label" width={126} tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} />
                       <Tooltip formatter={(value) => [formatNumber(Number(value), 2), chartMetric === "suggested_reorder_quantity" ? "Suggested reorder" : "Reorder point"]} />
                       <Bar dataKey="value" name="Units" radius={[0, 6, 6, 0]} barSize={14} isAnimationActive={isAnimationActive} animationDuration={animationDuration} animationEasing={animationEasing}>
                         {chartRows.map((row, index) => <Cell key={`${row.label}-${index}`} fill={index % 2 === 0 ? "#3e75bd" : "#a6c4f1"} />)}

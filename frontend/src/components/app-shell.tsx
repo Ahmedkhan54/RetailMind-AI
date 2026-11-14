@@ -190,7 +190,7 @@ export function AppShell({ children, currentHref, currentLabel }: { children: Re
   }
 
   return (
-    <div className="app-shell">
+    <div className={cn("app-shell", currentHref === "/overview" && "app-shell-executive")}>
       <aside className="app-sidebar"><Sidebar activeHref={currentHref} role={session?.role} /></aside>
       <div className="workspace-frame">
         <header className="topbar">
@@ -199,7 +199,7 @@ export function AppShell({ children, currentHref, currentLabel }: { children: Re
               <SheetTrigger render={<Button variant="ghost" size="icon" className="mobile-menu" aria-label="Open navigation" />}>
                 <Menu aria-hidden="true" />
               </SheetTrigger>
-              <SheetContent side="left" className="mobile-sheet" showCloseButton={false}>
+              <SheetContent side="left" className={cn("mobile-sheet", currentHref === "/overview" && "mobile-sheet-executive")}>
                 <SheetTitle className="sr-only">RetailMind AI navigation</SheetTitle>
                 <SheetDescription className="sr-only">Navigate to an analytics workspace page.</SheetDescription>
                 <Sidebar activeHref={currentHref} onNavigate={() => setMobileNavOpen(false)} role={session?.role} />
