@@ -357,7 +357,7 @@ export function CustomizeDashboard({ datasetId, datasetName, onModeChange }: { d
   if (filters.dateTo) dateParams.set("date_to", filters.dateTo);
   const overviewQuery = dateParams.toString();
   const overviewEndpoint = `/api/retailmind/dashboard/overview/${encodeURIComponent(datasetId)}${overviewQuery ? `?${overviewQuery}` : ""}`;
-  const visualsQuery = useSWR<VisualPayload>(visualEndpoint(datasetId, filters), fetchVisuals);
+  const visualsQuery = useSWR<VisualPayload>(visualEndpoint(datasetId, filters), fetchVisuals, { keepPreviousData: true, revalidateOnFocus: false });
   const overviewQueryResult = useSWR<OverviewLite>(overviewEndpoint, async (url: string) => {
     const response = await fetch(url, { cache: "no-store" });
     const payload = await response.json();

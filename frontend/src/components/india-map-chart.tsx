@@ -4,123 +4,81 @@
  * India state map rendered from the bundled Highcharts/OpenStreetMap GeoJSON.
  * No coordinates are fabricated: state positions come from the boundary file,
  * while bubble anchors are area centroids derived from those same polygons.
+ *
+ * The component only plots the values it is given. A state with no value is
+ * drawn as an explicit "no data" shape instead of a near-invisible tint.
  */
 
 import { useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import useSWR from "swr";
-import { formatCurrency } from "@/lib/format";import { ChartEmpty } from "@/components/visual-charts";
+import { formatCompactCurrency, formatCurrency, formatPercent } from "@/lib/format";
+import {
+  featureCentroid,
+  fetchIndiaGeography,
+  INDIA_GEO_URL,
+  INDIA_MAP_HEIGHT,
+  INDIA_MAP_WIDTH,
+  INDIA_STATE_NAMES,
+  normaliseRegion,
+  pathFor,
+  type IndiaGeo,
+  type Position,
+} from "@/lib/india-geo";
 
-type Position = [number, number];
-type PolygonGeometry = { type: "Polygon"; coordinates: Position[][] };
-type MultiPolygonGeometry = { type: "MultiPolygon"; coordinates: Position[][][] };
-type Feature = {
-  type: "Feature";
-  properties: { name?: string; "hc-key"?: string; [key: string]: unknown };
-  geometry: PolygonGeometry | MultiPolygonGeometry;
-};
-type GeoCollection = { type: "FeatureCollection"; features: Feature[] };
+export { INDIA_STATE_NAMES, normaliseRegion };
 
 export type RegionValue = { name: string; sales: number; profit: number; margin?: number | null };
-
 export type MapMode = "choropleth" | "heatmap" | "bubble";
-
-export const INDIA_STATE_NAMES = [
-  "Andaman and Nicobar Islands", "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chandigarh",
-  "Chhattisgarh", "Dadra and Nagar Haveli and Daman and Diu", "Delhi", "Goa", "Gujarat", "Haryana",
-  "Himachal Pradesh", "Jammu and Kashmir", "Jharkhand", "Karnataka", "Kerala", "Ladakh", "Lakshadweep",
-  "Madhya Pradesh", "Maharashtra", "Manipur", "Meghalaya", "Mizoram", "Nagaland", "Odisha", "Puducherry",
-  "Punjab", "Rajasthan", "Sikkim", "Tamil Nadu", "Telangana", "Tripura", "Uttar Pradesh", "Uttarakhand",
-  "West Bengal",
-];
-
-const STATE_ALIASES: Record<string, string> = {
-  orissa: "odisha",
-  uttaranchal: "uttarakhand",
-  pondicherry: "puducherry",
-  "j and k": "jammu and kashmir",
-  "jammu and kashmir state": "jammu and kashmir",
-  "ncr": "delhi",
-  "new delhi": "delhi",
-  "delhi ncr": "delhi",
-  "andaman and nicobar": "andaman and nicobar islands",
-  "dnh and dd": "dadra and nagar haveli and daman and diu",
-  "dadra and nagar haveli": "dadra and nagar haveli and daman and diu",
-  "daman and diu": "dadra and nagar haveli and daman and diu",
-  "dadra nagar haveli and daman diu": "dadra and nagar haveli and daman and diu",
-  "telengana": "telangana",
-  "chattisgarh": "chhattisgarh",
-  "west bengal state": "west bengal",
-};
-
-export function normaliseRegion(value: string): string {
-  const cleaned = value
-    .toLowerCase()
-    .replaceAll("&", " and ")
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim()
-    .replace(/\s+/g, " ");
-  return STATE_ALIASES[cleaned] ?? cleaned;
-}
 
 export function unmatchedRegions(regions: RegionValue[]): RegionValue[] {
   const known = new Set(INDIA_STATE_NAMES.map(normaliseRegion));
   return regions.filter((region) => !known.has(normaliseRegion(region.name)));
 }
 
-async function fetchGeography(url: string): Promise<GeoCollection> {
-  const response = await fetch(url, { cache: "force-cache" });
-  if (!response.ok) throw new Error("The bundled India boundary file could not be loaded.");
-  return (await response.json()) as GeoCollection;
+type Box = { x: number; y: number; width: number; height: number };
+
+function intersects(left: Box, right: Box): boolean {
+  return !(
+    left.x + left.width < right.x ||
+    right.x + right.width < left.x ||
+    left.y + left.height < right.y ||
+    right.y + right.height < left.y
+  );
 }
 
-function ringsFor(feature: Feature): Position[][] {
-  if (feature.geometry.type === "Polygon") return feature.geometry.coordinates;
-  return feature.geometry.coordinates.flatMap((polygon) => polygon);
-}
-
-function ringCentroid(ring: Position[]): { area: number; x: number; y: number } {
-  let area = 0;
-  let x = 0;
-  let y = 0;
-  for (let index = 0; index < ring.length; index += 1) {
-    const [x1, y1] = ring[index];
-    const [x2, y2] = ring[(index + 1) % ring.length];
-    const cross = x1 * y2 - x2 * y1;
-    area += cross;
-    x += (x1 + x2) * cross;
-    y += (y1 + y2) * cross;
+/** Greedy label placement in viewBox units; a label is skipped rather than overlapped. */
+function placeLabels(
+  entries: { key: string; point: Position; text: string }[],
+  placedCircles: { point: Position; radius: number }[] = [],
+): { key: string; text: string; x: number; y: number; width: number }[] {
+  const accepted: { key: string; text: string; x: number; y: number; width: number }[] = [];
+  const occupied: Box[] = placedCircles.map(({ point, radius }) => ({
+    x: point[0] - radius,
+    y: point[1] - radius,
+    width: radius * 2,
+    height: radius * 2,
+  }));
+  const font = 2.3;
+  for (const entry of entries) {
+    const width = Math.min(entry.text.length * font * 0.56, 26);
+    const candidates: Position[] = [
+      [entry.point[0] + 1.4, entry.point[1] - 1.4],
+      [entry.point[0] + 1.4, entry.point[1] + 3.1],
+      [entry.point[0] - width - 1.4, entry.point[1] - 1.4],
+      [entry.point[0] - width / 2, entry.point[1] - 2.6],
+      [entry.point[0] - width / 2, entry.point[1] + 3.6],
+    ];
+    for (const [x, y] of candidates) {
+      const box: Box = { x, y: y - font, width, height: font + 0.6 };
+      const inBounds = x > 0 && x + width < INDIA_MAP_WIDTH && y > font && y < INDIA_MAP_HEIGHT;
+      if (!inBounds) continue;
+      if (occupied.some((other) => intersects(box, other))) continue;
+      occupied.push(box);
+      accepted.push({ key: entry.key, text: entry.text, x, y, width });
+      break;
+    }
   }
-  area /= 2;
-  if (Math.abs(area) < 1e-9) {
-    const average = ring.reduce((sum, [lon, lat]) => ({ lon: sum.lon + lon, lat: sum.lat + lat }), { lon: 0, lat: 0 });
-    return { area: 1, x: average.lon / Math.max(ring.length, 1), y: average.lat / Math.max(ring.length, 1) };
-  }
-  return { area, x: x / (6 * area), y: y / (6 * area) };
-}
-
-function featureCentroid(feature: Feature): Position {
-  const rings = ringsFor(feature);
-  let totalArea = 0;
-  let x = 0;
-  let y = 0;
-  for (const ring of rings) {
-    const centroid = ringCentroid(ring);
-    const weight = Math.abs(centroid.area);
-    totalArea += weight;
-    x += centroid.x * weight;
-    y += centroid.y * weight;
-  }
-  if (!totalArea) return [0, 0];
-  return [x / totalArea, y / totalArea];
-}
-
-function pathFor(feature: Feature, project: (position: Position) => Position): string {
-  return ringsFor(feature)
-    .map((ring) => ring.map((point, index) => {
-      const [x, y] = project(point);
-      return `${index === 0 ? "M" : "L"}${x.toFixed(2)} ${y.toFixed(2)}`;
-    }).join(" ") + " Z")
-    .join(" ");
+  return accepted;
 }
 
 type Props = {
@@ -133,7 +91,7 @@ type Props = {
 };
 
 export function IndiaMapChart({ regions, mode, selectedRegion, search, onSelectRegion, height = 560 }: Props) {
-  const { data, error, isLoading } = useSWR<GeoCollection>("/india-states.geo.json", fetchGeography);
+  const { data, error, isLoading } = useSWR<IndiaGeo>(INDIA_GEO_URL, fetchIndiaGeography);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [hovered, setHovered] = useState("");
@@ -142,38 +100,44 @@ export function IndiaMapChart({ regions, mode, selectedRegion, search, onSelectR
 
   const projected = useMemo(() => {
     if (!data?.features?.length) return null;
-    const coordinates = data.features.flatMap((feature) => ringsFor(feature).flat());
-    const lons = coordinates.map(([lon]) => lon);
-    const lats = coordinates.map(([, lat]) => lat);
-    const minLon = Math.min(...lons);
-    const maxLon = Math.max(...lons);
-    const minLat = Math.min(...lats);
-    const maxLat = Math.max(...lats);
-    const width = 100;
-    const heightUnits = Math.max(40, (width * (maxLat - minLat)) / Math.max(maxLon - minLon, 0.001));
-    const project = ([lon, lat]: Position): Position => [
-      ((lon - minLon) / Math.max(maxLon - minLon, 0.001)) * width,
-      ((maxLat - lat) / Math.max(maxLat - minLat, 0.001)) * heightUnits,
-    ];
     const values = new Map(regions.map((region) => [normaliseRegion(region.name), region]));
     const features = data.features.map((feature) => {
       const name = String(feature.properties.name ?? feature.properties["hc-key"] ?? "Unknown");
-      const [lon, lat] = featureCentroid(feature);
-      const [x, y] = project([lon, lat]);
+      const key = normaliseRegion(name);
       return {
         name,
-        key: normaliseRegion(name),
-        path: pathFor(feature, project),
-        centroid: [x, y] as Position,
-        value: values.get(normaliseRegion(name)) ?? null,
+        key,
+        path: pathFor(feature),
+        centroid: featureCentroid(feature),
+        value: values.get(key) ?? null,
       };
     });
     const maxSales = Math.max(...features.map((feature) => feature.value?.sales ?? 0), 0);
-    return { width, height: heightUnits, features, maxSales };
+    const minSales = Math.min(...features.filter((feature) => feature.value).map((feature) => feature.value!.sales), maxSales);
+    const matched = features.filter((feature) => feature.value).length;
+    return { features, maxSales, minSales: Number.isFinite(minSales) ? minSales : 0, matched };
   }, [data, regions]);
 
   const query = normaliseRegion(search);
   const selectedKey = normaliseRegion(selectedRegion);
+
+  const labels = useMemo(() => {
+    if (!projected) return [];
+    const ranked = projected.features
+      .filter((feature) => feature.value && (!query || feature.key.includes(query)))
+      .sort((left, right) => (right.value?.sales ?? 0) - (left.value?.sales ?? 0))
+      .slice(0, 7);
+    const circles = mode === "bubble"
+      ? ranked.map((feature) => {
+          const ratio = projected.maxSales ? (feature.value?.sales ?? 0) / projected.maxSales : 0;
+          return { point: feature.centroid, radius: 0.9 + Math.sqrt(Math.max(ratio, 0)) * 4.2 };
+        })
+      : [];
+    return placeLabels(
+      ranked.map((feature) => ({ key: feature.key, point: feature.centroid, text: feature.name })),
+      circles,
+    );
+  }, [mode, projected, query]);
 
   function handleWheel(event: ReactWheelEvent<SVGSVGElement>) {
     event.preventDefault();
@@ -187,10 +151,10 @@ export function IndiaMapChart({ regions, mode, selectedRegion, search, onSelectR
   }
 
   function handlePointerMove(event: ReactPointerEvent<SVGSVGElement>) {
-    if (!drag.current || !projected || !svgRef.current) return;
+    if (!drag.current || !svgRef.current) return;
     const rect = svgRef.current.getBoundingClientRect();
-    const scaleX = projected.width / Math.max(rect.width, 1);
-    const scaleY = projected.height / Math.max(rect.height, 1);
+    const scaleX = INDIA_MAP_WIDTH / Math.max(rect.width, 1);
+    const scaleY = INDIA_MAP_HEIGHT / Math.max(rect.height, 1);
     setPan({
       x: drag.current.originX + (event.clientX - drag.current.startX) * scaleX,
       y: drag.current.originY + (event.clientY - drag.current.startY) * scaleY,
@@ -204,11 +168,15 @@ export function IndiaMapChart({ regions, mode, selectedRegion, search, onSelectR
     drag.current = null;
   }
 
-  if (error) return <ChartEmpty message={error.message} />;
-  if (isLoading || !projected) return <div className="loading-panel india-map-loading" aria-live="polite" />;
+  if (error) {
+    return <div className="india-map-empty" role="status">{error.message}</div>;
+  }
+  if (isLoading || !projected) return <div className="loading-panel india-map-loading" aria-live="polite" aria-label="Loading the India map" />;
+
+  const hasValues = projected.matched > 0;
 
   return (
-    <div className="india-map" style={{ minHeight: height }}>
+    <div className="india-map">
       <div className="india-map-toolbar">
         <span>{mode === "bubble" ? "State bubbles" : mode === "heatmap" ? "Geographic heatmap" : "Choropleth"}</span>
         <div>
@@ -217,11 +185,19 @@ export function IndiaMapChart({ regions, mode, selectedRegion, search, onSelectR
           <button type="button" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}>Reset</button>
         </div>
       </div>
+
+      {!hasValues ? (
+        <p className="india-map-empty" role="status">
+          No state-level values are available for this selection, so every boundary is shown as <strong>no data</strong>.
+        </p>
+      ) : null}
+
       <svg
         ref={svgRef}
-        viewBox={`0 0 ${projected.width} ${projected.height}`}
+        viewBox={`0 0 ${INDIA_MAP_WIDTH} ${INDIA_MAP_HEIGHT}`}
         className="india-map-svg"
-        style={{ height }}
+        style={{ maxHeight: height }}
+        preserveAspectRatio="xMidYMid meet"
         role="img"
         aria-label="India state-wise sales map"
         onWheel={handleWheel}
@@ -230,29 +206,32 @@ export function IndiaMapChart({ regions, mode, selectedRegion, search, onSelectR
         onPointerUp={handlePointerUp}
         onPointerLeave={handlePointerUp}
       >
-        <g transform={`translate(${projected.width / 2 + pan.x} ${projected.height / 2 + pan.y}) scale(${zoom}) translate(${-projected.width / 2} ${-projected.height / 2})`}>
+        <g transform={`translate(${INDIA_MAP_WIDTH / 2 + pan.x} ${INDIA_MAP_HEIGHT / 2 + pan.y}) scale(${zoom}) translate(${-INDIA_MAP_WIDTH / 2} ${-INDIA_MAP_HEIGHT / 2})`}>
           {projected.features.map((feature) => {
             const ratio = projected.maxSales ? (feature.value?.sales ?? 0) / projected.maxSales : 0;
             const isSelected = selectedKey === feature.key;
             const matches = !query || feature.key.includes(query);
-            const fill = mode === "heatmap"
-              ? `rgba(205, 92, 36, ${(feature.value ? 0.16 + ratio * 0.84 : 0.05).toFixed(3)})`
-              : `rgba(47, 101, 167, ${(feature.value ? 0.14 + ratio * 0.86 : 0.06).toFixed(3)})`;
+            const hasValue = Boolean(feature.value);
+            const fill = !hasValue
+              ? "#eef2f7"
+              : mode === "heatmap"
+                ? `rgba(193, 84, 32, ${(0.22 + ratio * 0.74).toFixed(3)})`
+                : `rgba(30, 82, 51, ${(0.24 + ratio * 0.72).toFixed(3)})`;
             return mode === "bubble" ? null : (
               <path
                 key={feature.key}
                 d={feature.path}
                 fill={fill}
-                stroke={isSelected ? "#b8860b" : hovered === feature.key ? "#173b73" : "#ffffff"}
-                strokeWidth={isSelected ? 1.6 : hovered === feature.key ? 1.1 : 0.35}
-                opacity={matches ? 1 : 0.25}
+                stroke={isSelected ? "#b8860b" : hovered === feature.key ? "#173b73" : hasValue ? "#ffffff" : "#c7d2df"}
+                strokeWidth={isSelected ? 1.2 : hovered === feature.key ? 0.9 : hasValue ? 0.4 : 0.3}
+                opacity={matches ? 1 : 0.28}
                 onClick={() => onSelectRegion(isSelected ? "" : feature.name)}
                 onMouseEnter={() => setHovered(feature.key)}
                 onMouseLeave={() => setHovered("")}
-                className={feature.value ? "india-map-state has-value" : "india-map-state"}
+                className={hasValue ? "india-map-state has-value" : "india-map-state no-value"}
                 tabIndex={0}
                 role="button"
-                aria-label={`${feature.name}: ${feature.value ? formatCurrency(feature.value.sales) : "no mapped sales"}`}
+                aria-label={`${feature.name}: ${feature.value ? formatCurrency(feature.value.sales) : "no mapped state data"}`}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
                     event.preventDefault();
@@ -260,38 +239,79 @@ export function IndiaMapChart({ regions, mode, selectedRegion, search, onSelectR
                   }
                 }}
               >
-                <title>{feature.value ? `${feature.name} · ${formatCurrency(feature.value.sales)} sales · ${formatCurrency(feature.value.profit)} profit` : `${feature.name} · no matching region value`}</title>
+                <title>{feature.value
+                  ? `${feature.name} · ${formatCurrency(feature.value.sales)} sales · ${formatCurrency(feature.value.profit)} profit${typeof feature.value.margin === "number" ? ` · ${formatPercent(feature.value.margin * 100)} margin` : ""}`
+                  : `${feature.name} · no data for this selection`}</title>
               </path>
             );
           })}
+
           {mode === "bubble" ? projected.features.map((feature) => {
-            const ratio = projected.maxSales ? (feature.value?.sales ?? 0) / projected.maxSales : 0;
+            if (!feature.value) return null;
+            const ratio = projected.maxSales ? feature.value.sales / projected.maxSales : 0;
             const isSelected = selectedKey === feature.key;
             const matches = !query || feature.key.includes(query);
-            if (!feature.value) return null;
             return (
-              <g key={feature.key} opacity={matches ? 1 : 0.25} onClick={() => onSelectRegion(isSelected ? "" : feature.name)} className="india-map-bubble" role="button" tabIndex={0} aria-label={`${feature.name}: ${formatCurrency(feature.value.sales)}`} onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === " ") {
-                  event.preventDefault();
-                  onSelectRegion(isSelected ? "" : feature.name);
-                }
-              }}>
-                <circle cx={feature.centroid[0]} cy={feature.centroid[1]} r={0.7 + Math.sqrt(ratio) * 4.6} fill={isSelected ? "#d9a41a" : "#2f65a7"} fillOpacity={0.62} stroke="#ffffff" strokeWidth={0.35}>
+              <g
+                key={feature.key}
+                opacity={matches ? 1 : 0.28}
+                onClick={() => onSelectRegion(isSelected ? "" : feature.name)}
+                className="india-map-bubble"
+                role="button"
+                tabIndex={0}
+                aria-label={`${feature.name}: ${formatCurrency(feature.value.sales)}`}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onSelectRegion(isSelected ? "" : feature.name);
+                  }
+                }}
+              >
+                <circle
+                  cx={feature.centroid[0]}
+                  cy={feature.centroid[1]}
+                  r={0.9 + Math.sqrt(Math.max(ratio, 0)) * 4.2}
+                  fill={isSelected ? "#d9a41a" : "#1e5233"}
+                  fillOpacity={0.62}
+                  stroke="#ffffff"
+                  strokeWidth={0.35}
+                >
                   <title>{`${feature.name} · ${formatCurrency(feature.value.sales)} sales`}</title>
                 </circle>
               </g>
             );
           }) : null}
+
+          {labels.map((label) => (
+            <text
+              key={label.key}
+              x={label.x}
+              y={label.y}
+              className="india-map-label"
+              fontSize="2.3"
+              fill="#173b2a"
+              paintOrder="stroke"
+              stroke="#ffffff"
+              strokeWidth="0.5"
+            >
+              {label.text}
+            </text>
+          ))}
         </g>
       </svg>
+
       <div className="india-map-legend">
         <span className="india-map-legend-swatch" aria-hidden="true" />
-        <span>Lower sales</span>
+        <span>{hasValues ? formatCompactCurrency(projected.minSales) : "No data"}</span>
         <i aria-hidden="true" />
-        <span>Higher sales</span>
+        <span>{hasValues ? formatCompactCurrency(projected.maxSales) : "No data"}</span>
+        <span className="india-map-legend-gap" />
+        <span className="india-map-legend-nodata" aria-hidden="true" />
+        <span>No data for this selection</span>
       </div>
-      {mode === "bubble" ? <p className="india-map-note">Bubble anchors are area centroids calculated from the bundled state boundaries — not from city coordinates.</p> : null}
-      <p className="india-map-note">Zoom with +/− or the mouse wheel; drag to pan when zoomed. Click a state to cross-filter the dashboard.</p>
+
+      {mode === "bubble" ? <p className="india-map-note">Bubble anchors are area centroids calculated from the bundled state boundaries — they are not city coordinates.</p> : null}
+      <p className="india-map-note">Zoom with +/− or the mouse wheel; drag to pan when zoomed. Select a state to cross-filter every chart on the page.</p>
     </div>
   );
 }

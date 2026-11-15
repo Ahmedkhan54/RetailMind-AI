@@ -12,6 +12,16 @@ export type DimensionRow = {
   quantity?: number | null;
 };
 
+export type StateRow = {
+  state: string;
+  sales: number;
+  profit: number;
+  margin?: number | null;
+  source?: "region" | "city" | "region+city" | string;
+};
+
+export type UnmatchedRegionRow = { label: string; sales: number };
+
 export type HeatmapRow = { row_label: string; col_label: string; sales: number; profit: number };
 export type HistogramBin = { label: string; count: number; bin_start: number; bin_end: number };
 export type BoxSummary = { label: string; min: number; q1: number; median: number; q3: number; max: number; mean: number; count: number };
@@ -30,12 +40,15 @@ export type VisualPayload = {
   applied_filters?: Record<string, string>;
   kpis?: Record<string, number | null> | null;
   dimensions?: Record<string, boolean>;
-  filters: { category: string[]; city: string[]; region: string[] };
+  filters: { category: string[]; city: string[]; region: string[]; state?: string[] };
   monthly: { date: string; sales: number; profit: number }[];
   categories: DimensionRow[];
   products: DimensionRow[];
   cities: DimensionRow[];
   regions: DimensionRow[];
+  states?: StateRow[];
+  state_source?: "region" | "city" | "region+city" | "none" | string;
+  unmatched_regions?: UnmatchedRegionRow[];
   category_month: { label: string; date: string; sales: number; profit: number }[];
   category_city: HeatmapRow[];
   region_month: { label: string; date: string; sales: number; profit: number }[];
@@ -57,9 +70,10 @@ export type VisualFilters = {
   category: string;
   city: string;
   region: string;
+  state: string;
 };
 
-export const EMPTY_FILTERS: VisualFilters = { dateFrom: "", dateTo: "", category: "", city: "", region: "" };
+export const EMPTY_FILTERS: VisualFilters = { dateFrom: "", dateTo: "", category: "", city: "", region: "", state: "" };
 
 export function visualEndpoint(datasetId: string, filters: VisualFilters): string {
   const params = new URLSearchParams();
@@ -68,6 +82,7 @@ export function visualEndpoint(datasetId: string, filters: VisualFilters): strin
   if (filters.category) params.set("category", filters.category);
   if (filters.city) params.set("city", filters.city);
   if (filters.region) params.set("region", filters.region);
+  if (filters.state) params.set("state", filters.state);
   const query = params.toString();
   return `/api/retailmind/visuals/${encodeURIComponent(datasetId)}${query ? `?${query}` : ""}`;
 }

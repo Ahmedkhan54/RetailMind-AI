@@ -36,13 +36,13 @@ export function CityAnalyticsPage({ item }: { item: NavigationItem }) {
   const [search, setSearch] = useState("");
 
   const baseUrl = dataset
-    ? visualEndpoint(dataset.id, { dateFrom, dateTo, category, city: "", region: "" })
+    ? visualEndpoint(dataset.id, { dateFrom, dateTo, category, city: "", region: "", state: "" })
     : null;
-  const detailUrl = dataset
-    ? visualEndpoint(dataset.id, { dateFrom, dateTo, category, city: selectedCity, region: "" })
+  const detailUrl = dataset && selectedCity
+    ? visualEndpoint(dataset.id, { dateFrom, dateTo, category, city: selectedCity, region: "", state: "" })
     : null;
-  const baseQuery = useSWR<VisualPayload>(baseUrl, fetchVisuals);
-  const detailQuery = useSWR<VisualPayload>(detailUrl, fetchVisuals);
+  const baseQuery = useSWR<VisualPayload>(baseUrl, fetchVisuals, { keepPreviousData: true, revalidateOnFocus: false });
+  const detailQuery = useSWR<VisualPayload>(detailUrl, fetchVisuals, { keepPreviousData: true, revalidateOnFocus: false });
   const base = baseQuery.data;
   const detail = selectedCity ? detailQuery.data : base;
   const error = baseQuery.error ?? detailQuery.error;

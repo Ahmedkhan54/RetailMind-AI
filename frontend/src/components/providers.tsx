@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useMemo, useState, useSyncExternalStore, type ReactNode } from "react";
 import useSWR from "swr";
 import { AnimationPreferenceProvider } from "@/lib/animation-preference";
 
@@ -90,6 +90,42 @@ type SessionContextValue = {
 const DatasetContext = createContext<DatasetContextValue | null>(null);
 const SessionContext = createContext<SessionContextValue | null>(null);
 
+const ACTIVE_DATASET_PREFIX = "retailmind_active_dataset";
+
+function storageKeyFor(session: SessionData | undefined): string | null {
+  return session ? `${ACTIVE_DATASET_PREFIX}:${session.user.id}` : null;
+}
+
+// The persisted dataset id is read from localStorage through an external store
+// so it is never copied into React state inside an effect (which would trigger
+// a cascading render on boot).
+const activeDatasetListeners = new Set<() => void>();
+
+function subscribeActiveDataset(listener: () => void): () => void {
+  activeDatasetListeners.add(listener);
+  const onStorage = (event: StorageEvent) => {
+    if (!event.key || event.key.startsWith(ACTIVE_DATASET_PREFIX)) listener();
+  };
+  window.addEventListener("storage", onStorage);
+  return () => {
+    activeDatasetListeners.delete(listener);
+    window.removeEventListener("storage", onStorage);
+  };
+}
+
+function notifyActiveDatasetChange(): void {
+  for (const listener of activeDatasetListeners) listener();
+}
+
+function readPersistedDatasetId(storageKey: string | null): string | null {
+  if (!storageKey) return null;
+  try {
+    return window.localStorage.getItem(storageKey);
+  } catch {
+    return null;
+  }
+}
+
 export function AppProviders({ children }: { children: ReactNode }) {
   const { data: session, error: sessionError, isLoading: sessionLoading, mutate: retrySession } = useSWR<SessionData>(
     "/api/retailmind/auth/session",
@@ -106,10 +142,29 @@ export function AppProviders({ children }: { children: ReactNode }) {
   const { data: datasetIndex, isLoading: datasetsLoading, mutate: refreshDatasets } = useSWR<{ datasets: DatasetSummary[] }>(
     session ? "/api/retailmind/datasets" : null,
     fetchJson,
-    { revalidateOnFocus: false, dedupingInterval: 30000, keepPreviousData: true, shouldRetryOnError: false },
+    { revalidateOnFocus: true, dedupingInterval: 30000, keepPreviousData: true, shouldRetryOnError: false },
   );
   const [datasetOverride, setDatasetOverride] = useState<ActiveDataset | null | undefined>(undefined);
-  const defaultDatasetId = datasetOverride === undefined ? datasetIndex?.datasets[0]?.id : undefined;
+  const storageKey = storageKeyFor(session);
+
+  // Restore the dataset the user last chose. Keyed per user so one account can
+  // never inherit another account's selection.
+  const persistedId = useSyncExternalStore(
+    subscribeActiveDataset,
+    () => readPersistedDatasetId(storageKey),
+    () => null,
+  );
+
+  // A stored id is trusted only while it still appears in this user's list, so
+  // a deleted or foreign id silently falls back to the newest dataset.
+  const validPersistedId = persistedId && datasetIndex?.datasets.some((entry) => entry.id === persistedId)
+    ? persistedId
+    : null;
+
+  const defaultDatasetId = datasetOverride === undefined
+    ? (validPersistedId ?? datasetIndex?.datasets[0]?.id)
+    : undefined;
+
   const { data: savedDataset } = useSWR<{
     dataset_id: string;
     filename: string;
@@ -125,6 +180,29 @@ export function AppProviders({ children }: { children: ReactNode }) {
     fetchJson,
     { revalidateOnFocus: false, dedupingInterval: 30000, keepPreviousData: true, shouldRetryOnError: false },
   );
+
+  const selectDataset = useCallback((next: ActiveDataset | null) => {
+    setDatasetOverride(next);
+    if (typeof window === "undefined" || !storageKey) return;
+    try {
+      if (next) window.localStorage.setItem(storageKey, next.id);
+      else window.localStorage.removeItem(storageKey);
+    } catch {
+      /* The selection still applies to this session. */
+    }
+    notifyActiveDatasetChange();
+  }, [storageKey]);
+
+  const resetDatasetSelection = useCallback(() => {
+    setDatasetOverride(undefined);
+    if (typeof window === "undefined" || !storageKey) return;
+    try {
+      window.localStorage.removeItem(storageKey);
+    } catch {
+      /* The default dataset still applies. */
+    }
+    notifyActiveDatasetChange();
+  }, [storageKey]);
 
   const datasetValue = useMemo(() => {
     const activeDataset: ActiveDataset | null = (sessionError as ApiError | undefined)?.status === 401
@@ -148,11 +226,11 @@ export function AppProviders({ children }: { children: ReactNode }) {
       dataset: activeDataset,
       datasets: datasetIndex?.datasets ?? [],
       datasetsLoading,
-      setDataset: setDatasetOverride,
-      resetDatasetSelection: () => setDatasetOverride(undefined),
+      setDataset: selectDataset,
+      resetDatasetSelection,
       refreshDatasets,
     };
-  }, [datasetIndex?.datasets, datasetsLoading, datasetOverride, refreshDatasets, savedDataset, sessionError]);
+  }, [datasetIndex?.datasets, datasetsLoading, datasetOverride, refreshDatasets, resetDatasetSelection, savedDataset, selectDataset, sessionError]);
   const sessionValue = useMemo(() => ({
     session: session ?? null,
     sessionLoading,

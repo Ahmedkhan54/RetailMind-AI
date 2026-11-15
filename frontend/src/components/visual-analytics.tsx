@@ -112,7 +112,7 @@ export function VisualAnalyticsPage({ item }: { item: NavigationItem }) {
   const [search, setSearch] = useState("");
 
   const endpoint = dataset ? visualEndpoint(dataset.id, filters) : null;
-  const { data, error, isLoading } = useSWR<VisualPayload>(endpoint, fetchVisuals);
+  const { data, error, isLoading } = useSWR<VisualPayload>(endpoint, fetchVisuals, { keepPreviousData: true, revalidateOnFocus: false });
   const { isAnimationActive } = useChartAnimation();
 
   const groupRows = useMemo<DimensionRow[]>(() => {

@@ -5,7 +5,7 @@ never writes to the configured MySQL database.
 """
 from __future__ import annotations
 
-from io import BytesIO
+from io import BytesIO, TextIOWrapper
 import csv
 from difflib import SequenceMatcher
 import logging
@@ -210,7 +210,10 @@ def duplicate_source_columns(content: bytes, filename: str, sheet_name: str | No
     """Return duplicate header names before pandas can silently disambiguate them."""
     try:
         if filename.lower().endswith(".csv"):
-            header = next(csv.reader(BytesIO(content).read().decode("utf-8-sig").splitlines()), [])
+            # Stream only the header row instead of decoding and splitting the
+            # entire upload just to detect duplicate column names.
+            with TextIOWrapper(BytesIO(content), encoding="utf-8-sig", newline="") as stream:
+                header = next(csv.reader(stream), [])
         elif _is_excel(filename):
             from openpyxl import load_workbook
             workbook = load_workbook(BytesIO(content), read_only=True, data_only=True)

@@ -2230,6 +2230,11 @@ button[aria-label="Next.js Devtools"],
   margin: 0 0 20px;
 }
 
+/* The shared .brand-name colour is tuned for the dark sidebar, so the mobile
+   login lockup needs explicit dark text on the light panel. */
+.login-mobile-brand .brand-name { color: #1a3a2a; }
+.login-mobile-brand .brand-name span { color: #2d7a52; }
+
 .login-card {
   border-color: #c8e6c9;
   border-radius: 14px;
@@ -3082,4 +3087,487 @@ button[aria-label="Next.js Devtools"],
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/* ============================================================
+   ADVANCED VISUAL ANALYTICS + MAPS
+   Restored after c54c45d dropped the block; extended for the
+   current green theme, full-width maps and explicit no-data.
+   ============================================================ */
+
+.visual-grid { display: grid; gap: 14px; min-width: 0; }
+.visual-grid-two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.visual-grid-map { grid-template-columns: minmax(0, 1.55fr) minmax(290px, 0.95fr); align-items: start; }
+.visual-chart { width: 100%; min-width: 0; }
+.visual-filter-row { align-items: flex-end; }
+.visual-filter-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.visual-filter-chips button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #c8e6c9;
+  background: #eef7f1;
+  color: #1e5233;
+  border-radius: 999px;
+  padding: 6px 11px;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+  min-height: 30px;
+}
+.visual-filter-chips button:hover { background: #e0f0e6; }
+.visual-sort-buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.visual-table-toolbar { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 10px; margin-bottom: 10px; }
+.visual-table { width: 100%; min-width: 560px; border-collapse: collapse; font-size: 12px; }
+.visual-table th {
+  text-align: left;
+  color: #6b7d72;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 9px 10px;
+  border-bottom: 1px solid #d4e2d8;
+  white-space: nowrap;
+}
+.visual-table td { padding: 9px 10px; border-bottom: 1px solid #eef4f0; color: #24352c; }
+.visual-table tbody tr:hover { background: #f5f9f4; }
+.visual-table .text-right { text-align: right; }
+
+/* City bubble map */
+.city-analytics-filters { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 10px; }
+.city-analytics-layout { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(270px, 1fr); gap: 14px; align-items: start; }
+.city-map { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.city-map-toolbar { display: flex; align-items: flex-end; justify-content: space-between; flex-wrap: wrap; gap: 10px; }
+.city-map-search { display: flex; flex-direction: column; gap: 4px; color: #52685c; font-size: 12px; font-weight: 600; }
+.city-map-search input {
+  width: min(240px, 100%);
+  min-height: 38px;
+  border: 1px solid #c8e6c9;
+  border-radius: 8px;
+  background: #f7fbf8;
+  padding: 8px 10px;
+  color: #24352c;
+  font-size: 13px;
+}
+.city-map-zoom { display: flex; gap: 6px; }
+.city-map-zoom button { min-width: 40px; min-height: 36px; }
+.city-map-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid #d4e2d8;
+  border-radius: 12px;
+  background: #f7fbf8;
+  touch-action: none;
+  cursor: grab;
+}
+.city-map-svg:active { cursor: grabbing; }
+.city-map-marker { cursor: pointer; }
+.city-map-marker:focus-visible { outline: none; }
+.city-map-marker:focus-visible circle { stroke: #b8860b; stroke-width: 0.9; }
+.city-map-label { font-weight: 600; pointer-events: none; }
+.city-map-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; color: #6b7d72; font-size: 12px; }
+.city-map-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.city-map-dot { width: 8px; height: 8px; border-radius: 50%; background: #1e5233; opacity: 0.62; }
+.city-map-dot-large { width: 14px; height: 14px; opacity: 0.82; }
+.city-map-note { margin: 0; color: #8aaa9a; font-size: 11px; line-height: 1.55; }
+.city-map-unmapped {
+  border: 1px dashed #d4e2d8;
+  border-radius: 10px;
+  background: #fbfdfb;
+  padding: 11px 13px;
+  font-size: 12px;
+  color: #52685c;
+}
+.city-map-unmapped strong { display: block; margin-bottom: 7px; color: #24352c; }
+.city-map-unmapped div { display: flex; flex-wrap: wrap; gap: 6px; }
+.city-map-unmapped span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #e0ece4;
+  border-radius: 999px;
+  background: #fff;
+  padding: 5px 10px;
+}
+.city-map-unmapped em { color: #1e5233; font-style: normal; font-weight: 600; }
+.city-map-empty { margin: 0; color: #6b7d72; font-size: 13px; }
+.city-ranking-search { margin-bottom: 8px; width: 100%; }
+.city-detail-card { min-width: 0; }
+.city-detail-placeholder { display: flex; align-items: center; gap: 10px; color: #6b7d72; font-size: 13px; line-height: 1.55; }
+.city-detail-placeholder svg { width: 22px; height: 22px; flex: 0 0 auto; color: #2d7a52; }
+.city-detail-placeholder p { margin: 0; }
+
+/* India state map */
+.india-map { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.india-map-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; color: #52685c; }
+.india-map-toolbar div { display: flex; gap: 6px; }
+.india-map-toolbar button {
+  min-width: 40px;
+  height: 36px;
+  border: 1px solid #c8e6c9;
+  background: #ffffff;
+  border-radius: 8px;
+  font-size: 12px;
+  color: #1e5233;
+  cursor: pointer;
+  padding: 0 10px;
+}
+.india-map-toolbar button:hover { background: #f0f7f2; }
+.india-map-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid #d4e2d8;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #f8fbf9, #eef6f0);
+  touch-action: none;
+  cursor: grab;
+}
+.india-map-svg:active { cursor: grabbing; }
+.india-map-state { transition: opacity 160ms ease, stroke-width 120ms ease; }
+.india-map-state.has-value { cursor: pointer; }
+.india-map-state.no-value { cursor: default; }
+.india-map-state:focus-visible { outline: none; stroke: #b8860b; stroke-width: 1.4; }
+.india-map-bubble { cursor: pointer; }
+.india-map-label { font-weight: 600; pointer-events: none; }
+.india-map-loading { height: 460px; }
+.india-map-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; font-size: 11px; color: #6b7d72; }
+.india-map-legend-swatch { width: 14px; height: 10px; border-radius: 3px; background: rgba(30, 82, 51, 0.28); }
+.india-map-legend i { width: 72px; height: 9px; border-radius: 5px; background: linear-gradient(90deg, rgba(30, 82, 51, 0.24), #1e5233); }
+.india-map-legend-gap { width: 10px; }
+.india-map-legend-nodata { width: 14px; height: 10px; border-radius: 3px; background: #eef2f7; border: 1px solid #c7d2df; }
+.india-map-note { font-size: 11px; color: #8aaa9a; line-height: 1.55; margin: 0; }
+.india-map-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  border: 1px dashed #d4e2d8;
+  border-radius: 10px;
+  background: #fbfdfb;
+  padding: 12px 14px;
+  color: #52685c;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.map-state-list { display: flex; flex-direction: column; gap: 2px; max-height: 440px; overflow: auto; margin-bottom: 10px; }
+.map-state-row {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto 46px;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  padding: 7px 6px;
+  cursor: pointer;
+  text-align: left;
+  min-height: 34px;
+}
+.map-state-row:hover, .map-state-row.is-active { background: #eef7f1; }
+.map-state-row strong { font-size: 11px; color: #24352c; white-space: nowrap; }
+.map-state-row em { font-style: normal; font-size: 10px; color: #6b7d72; text-align: right; }
+.unmatched-regions { display: flex; flex-wrap: wrap; gap: 6px; }
+.unmatched-regions span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px dashed #d6c49a;
+  background: #fdf8ec;
+  color: #6b5524;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 11px;
+}
+.unmatched-regions em { font-style: normal; color: #8a6d2e; }
+
+/* ============================================================
+   DASHBOARD CUSTOMIZATION
+   Also dropped by c54c45d; restored in the current green palette.
+   ============================================================ */
+
+.dashboard-mode-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.dashboard-mode-label { display: inline-flex; align-items: center; gap: 5px; color: #6b7d72; font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+.dashboard-mode-buttons { display: flex; gap: 4px; border: 1px solid #d4e2d8; border-radius: 9px; background: #eef7f1; padding: 3px; }
+.dashboard-mode-button { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; border: 0; border-radius: 6px; background: transparent; padding: 6px 12px; color: #52685c; line-height: 1.25; cursor: pointer; }
+.dashboard-mode-button strong { font-size: 11px; }
+.dashboard-mode-button span { font-size: 9px; }
+.dashboard-mode-button:hover { background: #ffffffaa; }
+.dashboard-mode-button.is-active { background: #ffffff; color: #1e5233; box-shadow: 0 1px 3px rgba(26, 58, 42, 0.12); }
+.dashboard-custom-toolbar { display: flex; flex-direction: column; gap: 8px; }
+.dashboard-filter-row { align-items: flex-end; }
+.dashboard-custom-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.dashboard-custom-actions > div:last-child { display: flex; flex-wrap: wrap; gap: 6px; }
+.dashboard-custom-status { color: #6b7d72; font-size: 10px; }
+.dashboard-catalog { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.dashboard-catalog-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(185px, 1fr)); gap: 7px; }
+.dashboard-catalog-grid button { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; border: 1px solid #d4e2d8; border-radius: 8px; background: #ffffff; padding: 9px 30px 9px 10px; text-align: left; cursor: pointer; }
+.dashboard-catalog-grid button:hover { border-color: #a9d0b8; background: #f5f9f4; }
+.dashboard-catalog-grid strong { color: #24352c; font-size: 11px; }
+.dashboard-catalog-grid span { color: #6b7d72; font-size: 9px; text-transform: capitalize; }
+.dashboard-catalog-grid svg { position: absolute; right: 9px; top: 50%; width: 14px; height: 14px; transform: translateY(-50%); color: #2d7a52; }
+.dashboard-empty-custom { display: flex; flex-direction: column; align-items: center; gap: 6px; border: 1px dashed #d4e2d8; border-radius: 12px; background: #fbfdfb; padding: 34px 18px; text-align: center; }
+.dashboard-empty-custom > svg { width: 30px; height: 30px; color: #2d7a52; }
+.custom-dashboard-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 13px; }
+.custom-dashboard-grid.is-empty { display: none; }
+.custom-widget { min-width: 0; transition: opacity 150ms ease, transform 150ms ease; }
+.custom-widget-span-1 { grid-column: span 2; }
+.custom-widget-span-2 { grid-column: span 3; }
+.custom-widget-span-3 { grid-column: span 6; }
+.custom-widget.is-dragging { opacity: 0.45; transform: scale(0.99); }
+.custom-widget-card { display: flex; flex-direction: column; height: 100%; }
+.custom-widget-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; padding-bottom: 2px !important; }
+.custom-widget-heading { display: flex; align-items: flex-start; gap: 5px; min-width: 0; }
+.custom-widget-heading > div { min-width: 0; }
+.custom-widget-drag { border: 0; background: transparent; color: #9aab9f; padding: 2px 0 0; cursor: grab; }
+.custom-widget-drag:active { cursor: grabbing; }
+.custom-widget-drag:hover { color: #2d7a52; }
+.custom-widget-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 2px; }
+.custom-widget-actions button { display: inline-flex; width: 32px; height: 32px; align-items: center; justify-content: center; border: 1px solid transparent; border-radius: 6px; background: transparent; color: #6b7d72; cursor: pointer; }
+.custom-widget-actions button:hover:not(:disabled) { border-color: #d4e2d8; background: #f2f8f4; color: #1e5233; }
+.custom-widget-actions button:disabled { opacity: 0.35; cursor: default; }
+.custom-widget-actions svg { width: 14px; height: 14px; }
+.custom-widget-config { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; margin: 0 16px 10px; border: 1px dashed #d4e2d8; border-radius: 8px; background: #f8fbf9; padding: 10px; }
+.custom-widget-config .compact-field input { min-width: 0; }
+.custom-widget-body { flex: 1; min-width: 0; }
+.custom-widget-chart { min-width: 0; }
+.custom-widget-aggregate { margin: 4px 0 0; color: #6b7d72; font-size: 10px; text-align: right; }
+.custom-widget-aggregate strong { color: #24352c; }
+.dashboard-widget-chart { min-width: 0; }
+.dashboard-widget-aggregate { margin: 4px 0 0; color: #6b7d72; font-size: 10px; text-align: right; }
+.custom-kpi { display: flex; flex-direction: column; gap: 5px; padding: 8px 2px; }
+.custom-kpi .metric-value { font-size: 25px; letter-spacing: -0.03em; }
+
+/* ============================================================
+   ADVANCED ANALYTICS COMPONENTS (restored)
+   Tabs, donuts, funnels, gauges, ribbons, alerts and insight
+   tiles lost their styles in c54c45d.
+   ============================================================ */
+
+.visual-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.visual-tab { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; border: 1px solid #d4e2d8; border-radius: 10px; background: #ffffff; padding: 10px 12px; text-align: left; cursor: pointer; transition: border-color 160ms ease, box-shadow 160ms ease; }
+.visual-tab strong { color: #24352c; font-size: 12px; }
+.visual-tab span { color: #6b7d72; font-size: 10px; line-height: 1.4; }
+.visual-tab:hover { border-color: #a9d0b8; }
+.visual-tab.is-active { border-color: #2d7a52; background: #f3f9f5; box-shadow: inset 0 0 0 2px #e0efe6; }
+.visual-chart-toolbar { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 10px; padding: 2px 0; }
+.visual-donut { display: grid; grid-template-columns: minmax(0, 1fr) minmax(150px, 0.9fr); align-items: center; gap: 8px; }
+.visual-donut-chart { position: relative; min-width: 0; }
+.visual-donut-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; pointer-events: none; }
+.visual-donut-center strong { color: #1e5233; font-size: 18px; letter-spacing: -0.02em; }
+.visual-donut-center span { max-width: 90px; color: #6b7d72; font-size: 10px; }
+.visual-donut-legend { display: flex; flex-direction: column; gap: 2px; max-height: 250px; margin: 0; padding: 0; overflow: auto; list-style: none; }
+.visual-legend-button { display: grid; grid-template-columns: 9px minmax(0, 1fr) auto auto; align-items: center; gap: 6px; width: 100%; border: 0; border-radius: 6px; background: transparent; padding: 5px 6px; color: #24352c; text-align: left; cursor: pointer; }
+.visual-legend-button:hover, .visual-legend-button:focus-visible { background: #f2f8f4; outline: none; }
+.visual-legend-button i { width: 8px; height: 8px; border-radius: 50%; }
+.visual-legend-button span { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.visual-legend-button strong { font-size: 11px; }
+.visual-legend-button em { font-style: normal; color: #6b7d72; font-size: 10px; }
+.visual-funnel { display: flex; flex-direction: column; gap: 8px; padding: 8px 0; }
+.visual-funnel-stage { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.visual-funnel-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 130px; border-radius: 6px; padding: 9px 12px; color: #ffffff; font-size: 11px; transition: width 320ms ease; }
+.visual-funnel-bar strong { font-size: 11px; }
+.visual-funnel-stage em { font-style: normal; color: #6b7d72; font-size: 10px; }
+.visual-gauge { max-width: 300px; margin: 0 auto; }
+.visual-gauge .gauge-center small { display: block; margin-top: 2px; color: #6b7d72; font-size: 10px; }
+.visual-ribbon { display: flex; flex-direction: column; gap: 4px; }
+.visual-ribbon svg { width: 100%; flex: 1; border-radius: 8px; background: #f7fbf8; }
+.visual-ribbon-axis { display: flex; justify-content: space-between; color: #6b7d72; font-size: 10px; }
+.visual-ribbon-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.visual-ribbon-legend button { display: inline-flex; align-items: center; gap: 4px; border: 0; background: transparent; padding: 2px 0; color: #52685c; font-size: 10px; cursor: pointer; }
+.visual-ribbon-legend i { width: 8px; height: 8px; border-radius: 2px; }
+.analytics-chart { height: 260px; margin-bottom: 4px; }
+.analytics-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.analytics-summary .metric-content { min-height: 96px; }
+.analytics-card-actions { display: flex; align-items: center; gap: 8px; }
+.preferences-note { margin: 2px 0 0; color: #8aaa9a; font-size: 11px; line-height: 1.5; }
+.inventory-assumptions { display: flex; flex-direction: column; gap: 5px; margin-top: 12px; border-top: 1px solid #e8f0ea; padding-top: 10px; }
+.inventory-assumptions p { margin: 0; color: #7d8f84; font-size: 11px; line-height: 1.5; }
+.segmentation-toolbar { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 10px; }
+.segmentation-toolbar .compact-field { min-width: 180px; }
+.segmentation-metric-text { font-size: 18px; line-height: 1.15; letter-spacing: -0.02em; }
+.alert-card-heading .panel-title { font-size: 15px !important; }
+.alert-card-grid { align-items: start; }
+.alert-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; border-top: 1px solid #e8f0ea; padding-top: 10px; }
+.alert-actions button { font-size: 12px; }
+.alert-email-status { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; border: 1px solid #d4e2d8; border-radius: 9px; background: #f7fbf8; padding: 10px 13px; color: #52685c; font-size: 12px; line-height: 1.5; }
+.alert-email-status strong { color: #1e5233; font-size: 12px; }
+.alert-email-status span { color: #6b7d72; }
+.alert-pref-toggle { display: inline-flex; align-items: center; gap: 6px; color: #24352c; font-size: 12px; font-weight: 550; }
+.alert-pref-toggle input { accent-color: #1e5233; }
+.alert-pref-toggle select { border: 1px solid #d4e2d8; border-radius: 6px; background: #fff; padding: 4px 6px; color: #24352c; font-size: 12px; }
+.insight-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; }
+.insight-tile { display: flex; gap: 12px; border: 1px solid #d4e2d8; border-radius: 10px; background: #fff; padding: 13px 15px; box-shadow: 0 1px 2px rgba(26, 58, 42, 0.05); }
+.insight-tile-index { flex: 0 0 auto; padding-top: 2px; color: #9aab9f; font-size: 11px; font-weight: 700; letter-spacing: 0.04em; }
+.insight-tile h3 { margin: 0 0 4px; color: #1e5233; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+.insight-tile p { margin: 0; color: #475467; font-size: 14px; line-height: 1.6; }
+.auth-loading-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; }
+.auth-loading small { color: #8aaa9a; font-size: 12px; }
+.upload-message { margin: 9px 0 0; color: #52685c; font-size: 12px; line-height: 1.5; }
+.upload-message-error { color: #ad4247; }
+
+/* ============================================================
+   RESPONSIVE LAYER
+   The global stylesheet previously had no media queries, so the
+   desktop shell was forced on every viewport.
+   ============================================================ */
+
+html, body { max-width: 100%; }
+.app-shell { min-width: 0; }
+.workspace-frame { max-width: 100%; min-width: 0; overflow-x: clip; }
+.workspace-content { min-width: 0; }
+
+@media (max-width: 1280px) {
+  .workspace-content { padding: 24px 22px 18px; }
+  .topbar { padding: 0 22px; }
+  .visual-grid-map { grid-template-columns: minmax(0, 1.45fr) minmax(260px, 0.95fr); }
+  .city-analytics-layout { grid-template-columns: minmax(0, 1.55fr) minmax(250px, 1fr); }
+}
+
+@media (max-width: 1100px) {
+  .visual-grid-two,
+  .visual-grid-map { grid-template-columns: minmax(0, 1fr); }
+  .city-analytics-layout { grid-template-columns: minmax(0, 1fr); }
+  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .info-grid-three { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (max-width: 1024px) {
+  .app-sidebar { display: none; }
+  .mobile-menu { display: inline-flex; }
+  .topbar { height: 58px; flex-basis: 58px; padding: 0 16px; gap: 10px; }
+  .topbar-leading, .topbar-actions { gap: 10px; }
+  .workspace-content { padding: 18px 16px 16px; }
+  .workspace-footer { padding: 12px 16px 14px; }
+  .upload-layout { grid-template-columns: minmax(0, 1fr); }
+  .review-tools-grid { grid-template-columns: minmax(0, 1fr); }
+  .mobile-sheet { width: min(88vw, 320px) !important; }
+  .mobile-sheet .sidebar-inner { width: 100%; }
+  /* Login: the story panel is decorative, so a narrow screen shows only the form. */
+  .login-page { grid-template-columns: minmax(0, 1fr); }
+  .login-story { display: none; }
+  .login-mobile-brand { display: inline-flex; }
+  .login-panel { min-height: 100vh; padding: 32px 20px; }
+}
+
+@media (max-width: 900px) {
+  .global-search { width: 150px; }
+  .profile-name { display: none; }
+  .page-heading-row { align-items: flex-start; flex-direction: column; gap: 12px; }
+  .page-actions { width: 100%; flex-wrap: wrap; }
+  .filter-row { align-items: stretch; flex-direction: column; }
+  .filter-row .analytics-date-filter { width: 100%; }
+  .visual-filter-row { align-items: stretch; }
+  .compact-field { min-width: 0; flex: 1 1 160px; }
+  .city-analytics-filters { width: 100%; }
+  .india-map-legend { gap: 6px; }
+  .custom-dashboard-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .custom-widget-span-1, .custom-widget-span-2 { grid-column: span 1; }
+  .custom-widget-span-3 { grid-column: span 2; }
+}
+
+@media (max-width: 768px) {
+  .workspace-content { padding: 14px 12px 14px; }
+  .page-stack { gap: 14px; }
+  .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .metric-content { min-height: 102px; padding: 12px !important; }
+  .global-search-wrap { display: none; }
+  .breadcrumb { font-size: 10px; }
+  .topbar-actions .topbar-icon-button { min-width: 40px; min-height: 40px; }
+  .profile-avatar { width: 34px; height: 34px; }
+  .panel-header { flex-wrap: wrap; }
+  .visual-table-toolbar { align-items: stretch; }
+  .visual-table-toolbar .compact-field { flex: 1 1 100%; }
+  .city-map-toolbar { align-items: stretch; flex-direction: column; }
+  .city-map-search input { width: 100%; }
+  .city-map-zoom { justify-content: flex-start; }
+  .visual-sort-buttons { width: 100%; }
+  .visual-sort-buttons > * { flex: 1 1 auto; }
+  .upload-footer { align-items: stretch; flex-direction: column; gap: 10px; }
+  .upload-footer button { width: 100%; min-height: 44px; }
+  .upload-dropzone { min-height: 160px; }
+  .selected-file { flex-wrap: wrap; }
+  .steps-list li { gap: 10px; }
+  .map-state-list { max-height: none; }
+  .workspace-footer { flex-wrap: wrap; row-gap: 4px; }
+  .city-detail-placeholder { align-items: flex-start; }
+}
+
+@media (max-width: 600px) {
+  .metric-grid,
+  .metric-grid.metric-grid-three { grid-template-columns: minmax(0, 1fr); }
+  .info-grid-three { grid-template-columns: minmax(0, 1fr); }
+  .topbar { padding: 0 12px; }
+  .breadcrumb > span:first-child,
+  .breadcrumb .breadcrumb-slash { display: none; }
+  .page-title { font-size: clamp(20px, 6vw, 26px); }
+  .page-description { font-size: 12px; }
+  .panel-title { font-size: 12px !important; }
+  .city-map-svg,
+  .india-map-svg { border-radius: 10px; }
+  .india-map-toolbar { font-size: 10px; }
+  .unmatched-regions span { font-size: 10px; }
+  .backend-notice { align-items: flex-start; }
+  .custom-dashboard-grid { grid-template-columns: minmax(0, 1fr); }
+  .custom-widget-span-1, .custom-widget-span-2, .custom-widget-span-3 { grid-column: span 1; }
+  .custom-widget-actions button { width: 40px; height: 40px; }
+  .dashboard-mode-buttons { width: 100%; }
+  .dashboard-mode-button { flex: 1 1 0; }
+}
+
+@media (max-width: 480px) {
+  .workspace-content { padding: 12px 10px 12px; }
+  .login-panel { padding: 20px 14px; }
+  .login-card [data-slot="card-content"] { padding: 20px !important; }
+  .login-field [data-slot="input"] { height: 44px; font-size: 16px; }
+  .login-submit { height: 44px; }
+  .login-mode-toggle button { min-height: 40px; }
+  .login-heading h2 { font-size: 24px; }
+  .topbar { height: 54px; flex-basis: 54px; padding: 0 10px; }
+  .brand-name { font-size: 15px; }
+  .metric-grid { gap: 8px; }
+  .metric-value { font-size: 20px; }
+  .analytics-date-filter { flex-direction: column; align-items: stretch; }
+  .analytics-date-field { min-width: 0; width: 100%; }
+  .compact-field { flex-basis: 100%; }
+  .visual-sort-buttons > * { flex: 1 1 100%; }
+  .visual-filter-chips button { min-height: 34px; }
+  .city-map-zoom button { flex: 1 1 auto; }
+  .india-map-toolbar { flex-direction: column; align-items: stretch; }
+  .india-map-toolbar div { justify-content: space-between; }
+  .india-map-toolbar button { flex: 1 1 auto; }
+  .map-state-row { grid-template-columns: 22px minmax(0, 1fr) auto; }
+  .map-state-row em { display: none; }
+  .upload-dropzone { min-height: 140px; padding: 14px; }
+  .upload-dropzone strong { font-size: 13px; }
+  .upload-hint { font-size: 11px; }
+  .selected-file-copy strong { word-break: break-all; }
+  .steps-list li > span { width: 26px; height: 26px; font-size: 10px; }
+  .workspace-footer span:nth-child(2) { display: none; }
+  .city-map-legend,
+  .india-map-legend { font-size: 11px; }
+  .india-map-legend i { width: 48px; }
+}
+
+@media (max-width: 360px) {
+  .workspace-content { padding: 10px 8px 10px; }
+  .topbar { gap: 6px; }
+  .topbar-actions { gap: 6px; }
+  .metric-content { padding: 10px !important; }
+  .metric-value { font-size: 18px; }
+  .panel-title { font-size: 11px !important; }
+  .city-map-zoom,
+  .city-map-toolbar { gap: 6px; }
+  .india-map-legend-gap { display: none; }
+  .visual-table { min-width: 520px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .city-map-marker circle,
+  .city-map-marker text,
+  .india-map-state,
+  .india-map-bubble {
+    transition: none !important;
+  }
 }

@@ -58,7 +58,13 @@ export function DashboardRuntime() {
   const endpoint = dataset
     ? `/api/retailmind/dashboard/overview/${encodeURIComponent(dataset.id)}${query ? `?${query}` : ""}`
     : null;
-  const { data, error, isLoading } = useSWR<Overview>(endpoint, fetchJson);
+  const { data, error, isLoading } = useSWR<Overview>(endpoint, fetchJson, {
+    keepPreviousData: true,
+    revalidateOnFocus: false,
+    shouldRetryOnError: true,
+    errorRetryCount: 1,
+    errorRetryInterval: 1500,
+  });
 
   if (!dataset) return <DashboardPage />;
   if (mode === "custom") return <CustomizeDashboard key={dataset.id} datasetId={dataset.id} datasetName={dataset.filename} onModeChange={changeMode} />;

@@ -19,6 +19,19 @@ import { CircleAlert, Database, Download, Layers, MapPinned, Search } from "luci
 type SortKey = "sales" | "profit" | "margin";
 
 function stateRows(payload: VisualPayload | undefined): RegionValue[] {
+  const derived = payload?.states ?? [];
+  if (derived.length) {
+    return derived
+      .map((row) => ({
+        name: String(row.state),
+        sales: Number(row.sales) || 0,
+        profit: Number(row.profit) || 0,
+        margin: row.margin,
+      }))
+      .sort((left, right) => right.sales - left.sales);
+  }
+  // Backward compatibility: an older backend only returns region rows. Those
+  // are shown honestly even when they are sales zones rather than states.
   return (payload?.regions ?? [])
     .map((row) => ({
       name: row.region == null || row.region === "" ? "Unmapped" : String(row.region),
@@ -49,18 +62,22 @@ export function IndiaMapPage({ item }: { item: NavigationItem }) {
   const [citySearch, setCitySearch] = useState("");
   const [citySort, setCitySort] = useState<SortKey>("sales");
 
-  const mapFilters = { ...filters, city: "", region: "" };
+  const mapFilters = { ...filters, city: "", region: "", state: "" };
   const mapUrl = dataset ? visualEndpoint(dataset.id, mapFilters) : null;
   const detailUrl = dataset ? visualEndpoint(dataset.id, filters) : null;
-  const mapQuery = useSWR<VisualPayload>(mapUrl, fetchVisuals);
-  const detailQuery = useSWR<VisualPayload>(detailUrl, fetchVisuals);
+  const mapQuery = useSWR<VisualPayload>(mapUrl, fetchVisuals, { keepPreviousData: true, revalidateOnFocus: false });
+  const detailQuery = useSWR<VisualPayload>(detailUrl, fetchVisuals, { keepPreviousData: true, revalidateOnFocus: false });
   const mapData = mapQuery.data;
   const detail = detailQuery.data;
   const error = mapQuery.error ?? detailQuery.error;
 
   const regions = useMemo(() => stateRows(mapData), [mapData]);
-  const unmatched = useMemo(() => unmatchedRegions(regions), [regions]);
-  const matchedCount = regions.length - unmatched.length;
+  const unmatched = useMemo<RegionValue[]>(
+    () => (mapData?.unmatched_regions ?? []).map((row) => ({ name: row.label, sales: row.sales, profit: 0 })),
+    [mapData],
+  );
+  const unmatchedToShow = unmatched.length ? unmatched : unmatchedRegions(regions);
+  const stateSource = mapData?.state_source ?? "region";
 
   const filteredStates = useMemo(() => {
     const query = stateSearch.trim().toLowerCase();
@@ -84,6 +101,7 @@ export function IndiaMapPage({ item }: { item: NavigationItem }) {
   const totalProfit = typeof kpis?.total_profit === "number" ? kpis.total_profit : null;
   const margin = typeof kpis?.profit_margin === "number" ? kpis.profit_margin * 100 : null;
   const regionSelected = filters.region;
+  const stateSelected = filters.state;
   const topState = regions[0];
 
   function updateFilter(key: keyof VisualFilters, value: string) {
@@ -91,7 +109,7 @@ export function IndiaMapPage({ item }: { item: NavigationItem }) {
   }
 
   function selectRegion(name: string) {
-    setFilters((current) => ({ ...current, region: current.region === name ? "" : name }));
+    setFilters((current) => ({ ...current, state: current.state === name ? "" : name }));
   }
 
   const notes = [...(mapData?.notes ?? []), ...(detail?.notes ?? [])].filter((note, index, list) => list.indexOf(note) === index);
@@ -110,7 +128,9 @@ export function IndiaMapPage({ item }: { item: NavigationItem }) {
       </section>
 
       <div className="filter-row">
-        <span className="filter-note"><Database aria-hidden="true" /> {regions.length ? `${matchedCount} of ${regions.length} region values matched to state boundaries` : "Select a dataset with a mapped region/state field"}</span>
+        <span className="filter-note"><Database aria-hidden="true" /> {regions.length
+          ? `${regions.length} states resolved · ${stateSource === "city" || stateSource === "region+city" ? "aggregated from mapped city values" : "from the mapped region field"}`
+          : "Select a dataset with a mapped city or region field"}</span>
         <AnalyticsDateFilter
           dateFrom={filters.dateFrom}
           dateTo={filters.dateTo}
@@ -137,7 +157,8 @@ export function IndiaMapPage({ item }: { item: NavigationItem }) {
           </section>
 
           <section className="filter-row visual-filter-row" aria-label="Map filters">
-            <label className="compact-field"><span>Region / state</span><select value={filters.region} onChange={(event) => updateFilter("region", event.target.value)} disabled={!(mapData.filters.region.length)}><option value="">All states</option>{mapData.filters.region.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
+            <label className="compact-field"><span>State</span><select value={filters.state} onChange={(event) => updateFilter("state", event.target.value)} disabled={!(mapData.filters.state?.length)}><option value="">All states</option>{(mapData.filters.state ?? []).map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
+            <label className="compact-field"><span>Sales region</span><select value={filters.region} onChange={(event) => updateFilter("region", event.target.value)} disabled={!(mapData.filters.region.length)}><option value="">All regions</option>{mapData.filters.region.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
             <label className="compact-field"><span>City</span><select value={filters.city} onChange={(event) => updateFilter("city", event.target.value)} disabled={!(mapData.filters.city.length)}><option value="">All cities</option>{mapData.filters.city.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
             <label className="compact-field"><span>Category</span><select value={filters.category} onChange={(event) => updateFilter("category", event.target.value)} disabled={!(mapData.filters.category.length)}><option value="">All categories</option>{mapData.filters.category.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
             <label className="compact-field"><span>Search states</span><input value={stateSearch} onChange={(event) => setStateSearch(event.target.value)} placeholder="e.g. Karnataka" /></label>
@@ -149,27 +170,33 @@ export function IndiaMapPage({ item }: { item: NavigationItem }) {
             <Button type="button" variant="outline" size="sm" onClick={() => { setFilters(EMPTY_FILTERS); setStateSearch(""); setCitySearch(""); }}>Clear</Button>
           </section>
 
-          {regionSelected ? <div className="visual-filter-chips"><button type="button" onClick={() => updateFilter("region", "")}>region: {regionSelected} <span aria-hidden="true">×</span></button>{filters.city ? <button type="button" onClick={() => updateFilter("city", "")}>city: {filters.city} <span aria-hidden="true">×</span></button> : null}</div> : null}
+          {stateSelected || regionSelected || filters.city ? (
+            <div className="visual-filter-chips">
+              {stateSelected ? <button type="button" onClick={() => updateFilter("state", "")}>state: {stateSelected} <span aria-hidden="true">×</span></button> : null}
+              {regionSelected ? <button type="button" onClick={() => updateFilter("region", "")}>region: {regionSelected} <span aria-hidden="true">×</span></button> : null}
+              {filters.city ? <button type="button" onClick={() => updateFilter("city", "")}>city: {filters.city} <span aria-hidden="true">×</span></button> : null}
+            </div>
+          ) : null}
 
           <section className="visual-grid visual-grid-map">
             <Card className="panel-card">
               <CardHeader className="panel-header">
-                <div><CardTitle className="panel-title">India state map</CardTitle><p className="panel-subtitle">Sales intensity by mapped region/state · zoom, pan, search, and click to cross-filter</p></div>
+                <div><CardTitle className="panel-title">India state map</CardTitle><p className="panel-subtitle">Sales intensity by resolved state · zoom, pan, search, and click to cross-filter</p></div>
                 <Badge variant="secondary">Live data</Badge>
               </CardHeader>
               <CardContent>
-                <IndiaMapChart regions={regions} mode={mode} selectedRegion={filters.region} search={stateSearch} onSelectRegion={selectRegion} height={520} />
+                <IndiaMapChart regions={regions} mode={mode} selectedRegion={filters.state} search={stateSearch} onSelectRegion={selectRegion} height={560} />
               </CardContent>
             </Card>
             <Card className="panel-card">
               <CardHeader className="panel-header">
-                <div><CardTitle className="panel-title">State ranking</CardTitle><p className="panel-subtitle">Search results from real region values</p></div>
+                <div><CardTitle className="panel-title">State ranking</CardTitle><p className="panel-subtitle">Ranked by observed sales in the current selection</p></div>
                 <Badge variant="outline">{filteredStates.length} states</Badge>
               </CardHeader>
               <CardContent>
                 <div className="map-state-list">
                   {filteredStates.length ? filteredStates.slice(0, 30).map((region, index) => (
-                    <button type="button" key={region.name} className={cn("map-state-row", filters.region === region.name && "is-active")} onClick={() => selectRegion(region.name)}>
+                    <button type="button" key={region.name} className={cn("map-state-row", filters.state === region.name && "is-active")} onClick={() => selectRegion(region.name)}>
                       <span className="rank-number">{String(index + 1).padStart(2, "0")}</span>
                       <span className="rank-name">{region.name}</span>
                       <strong>{formatCompactCurrency(region.sales)}</strong>
@@ -182,16 +209,16 @@ export function IndiaMapPage({ item }: { item: NavigationItem }) {
             </Card>
           </section>
 
-          {!mapData.dimensions?.region ? (
-            <div className="backend-notice" role="status"><MapPinned aria-hidden="true" /><span>The dataset has no mapped <strong>region/state/province</strong> column, so the map cannot show a choropleth. City analytics below remain available from the mapped city field.</span></div>
+          {!mapData.dimensions?.city && !mapData.dimensions?.region ? (
+            <div className="backend-notice" role="status"><MapPinned aria-hidden="true" /><span>The dataset has no mapped <strong>city</strong> or <strong>region/state</strong> column, so no state-level choropleth can be built.</span></div>
           ) : null}
 
-          {unmatched.length ? (
+          {unmatchedToShow.length ? (
             <Card className="panel-card">
-              <CardHeader className="panel-header"><div><CardTitle className="panel-title">Unmatched region values</CardTitle><p className="panel-subtitle">These values do not match a state boundary; they are reported, never guessed onto the map.</p></div><Badge variant="outline">{unmatched.length}</Badge></CardHeader>
+              <CardHeader className="panel-header"><div><CardTitle className="panel-title">Unmatched location values</CardTitle><p className="panel-subtitle">These values are not state names, so they are reported here and never painted onto a boundary.</p></div><Badge variant="outline">{unmatchedToShow.length}</Badge></CardHeader>
               <CardContent>
                 <div className="unmatched-regions">
-                  {unmatched.map((region) => <span key={region.name}>{region.name}<em>{formatCompactCurrency(region.sales)}</em></span>)}
+                  {unmatchedToShow.map((region) => <span key={region.name}>{region.name}<em>{formatCompactCurrency(region.sales)}</em></span>)}
                 </div>
               </CardContent>
             </Card>
@@ -231,7 +258,9 @@ export function IndiaMapPage({ item }: { item: NavigationItem }) {
           </Card>
 
           {notes.length ? <p className="dashboard-footnote">{notes.join(" ")}</p> : null}
-          <p className="dashboard-footnote">Boundaries: Highcharts map collection (based on OpenStreetMap data). State values come only from the mapped region field in the uploaded dataset.</p>
+          <p className="dashboard-footnote">Boundaries: Highcharts map collection (based on OpenStreetMap data). {stateSource === "city" || stateSource === "region+city"
+            ? "State totals are summed from real city values in this dataset using the bundled city→state gazetteer; every city without a known state is listed, never guessed."
+            : "State totals come only from the mapped region field in this dataset."}</p>
         </>
       ) : null}
     </div>

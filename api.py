@@ -7,16 +7,20 @@ MySQL and filesystem services; parsed frames are cached in process memory.
 
 from __future__ import annotations
 
+import asyncio
 from collections import OrderedDict
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 import json
+import logging
 import math
 import os
 import secrets
 import time
 from pathlib import Path
-from typing import Any, Literal
+from threading import Lock
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 # Import the Excel engine during process startup. Pandas imports it lazily on
@@ -27,6 +31,7 @@ import pandas as pd
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Response, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from starlette.datastructures import Headers
 from starlette.middleware.gzip import GZipMiddleware
 
 from analytics import build_insights, calculate_kpis, grouped_performance, monthly_summary, prepare_data, safe_ratio
@@ -34,10 +39,11 @@ from retailmind.alerts import Alert, NotificationPreferences, SEVERITY_ORDER, de
 from retailmind.cleaning import DEFAULT_OPTIONS, analyse_cleaning, apply_cleaning
 from retailmind.exports import executive_pdf, markdown_report, workbook_bytes
 from retailmind.forecasting import forecast_dataset
+from retailmind.geo import resolve_state_name, resolve_states, state_aggregate, state_options, unmatched_state_labels
 from retailmind.inventory import build_inventory_recommendations
 from retailmind.powerbi import build_pbip, validate_pbip
 from retailmind.segmentation import segment_customers
-from data_sources import detect_column_mapping, duplicate_source_columns, profile_schema, read_uploaded_file
+from data_sources import detect_column_mapping, duplicate_source_columns, profile_data, profile_schema, read_uploaded_file
 from retailmind.ai.chat import answer_question
 from retailmind.ai.provider import get_provider
 from retailmind.ai.rag import MIN_RELEVANCE, RAGError, RAGStore
@@ -48,10 +54,19 @@ from src.business.goals import goal_progress
 from threading import RLock
 from src.auth.api import auth_service, database_connection, require_authenticated_user, router as account_router
 from src.auth.service import AuthenticationError, UserProfile
-from src.storage.uploads import UploadStorage, UploadStorageError
+from src.storage.factory import storage_from_environment, validate_storage_configuration
+from src.storage.uploads import (
+    UploadStorageError,
+    UploadStorageUnavailable,
+    ValidatedUpload,
+    default_max_excel_bytes,
+    format_byte_limit,
+)
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_EXCEL_UPLOAD_BYTES = default_max_excel_bytes()
 SUPPORTED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".xlsm"}
+EXCEL_EXTENSIONS = {".xlsx", ".xls", ".xlsm"}
 DATASET_LIMIT = 8
 
 
@@ -76,12 +91,152 @@ class DatasetRecord:
 
 
 DATASETS: OrderedDict[str, DatasetRecord] = OrderedDict()
+logger = logging.getLogger("retailmind.api")
+_ACTIVE_STORAGE_BACKEND = (os.getenv("RETAIL_UPLOAD_STORAGE_BACKEND") or "filesystem").strip().lower()
+if os.getenv("RENDER") and _ACTIVE_STORAGE_BACKEND != "r2" and not os.getenv("RETAIL_UPLOAD_STORAGE_DIR"):
+    # Render's default filesystem is ephemeral. Surface the misconfiguration in
+    # the logs instead of silently losing uploads after a restart.
+    logger.warning(
+        "RETAIL_UPLOAD_STORAGE_DIR is not set and R2 is not enabled; uploads will use Render's "
+        "ephemeral disk and may disappear after a restart. Set RETAIL_UPLOAD_STORAGE_BACKEND=r2 "
+        "(recommended) or mount a persistent disk and set the directory variable."
+    )
+# Fail fast: an enabled remote backend with incomplete configuration must stop
+# the process instead of silently writing to ephemeral local storage.
+validate_storage_configuration(Path(__file__).resolve().parent)
 RAG_STORES: dict[int, RAGStore] = {}
 RAG_LOCK = RLock()
 API_TOKEN = os.environ.get("RETAILMIND_API_TOKEN")
 app = FastAPI(title="RetailMind AI Python API", version="0.1.0")
 app.include_router(account_router)
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+# --- Direct-to-backend upload support -------------------------------------
+# Netlify Functions buffer request bodies and cap them at 6 MB, so a file
+# between 6 MB and the backend's 25 MB limit can never pass through the Next.js
+# same-origin proxy. The browser uploads straight to this service instead.
+# A short-lived, single-use ticket minted through the authenticated same-origin
+# proxy authorises that one request without exposing the session cookie or any
+# API token to browser code.
+
+UPLOAD_TICKET_TTL_SECONDS = 10 * 60
+# Tickets are process-local.  A restart or deploy invalidates outstanding
+# tickets (the client must request a new one), and running more than one worker
+# or instance requires a shared ticket store (for example Redis).  Do not scale
+# out without one: a ticket minted on instance A is unknown to instance B.
+UPLOAD_TICKETS: dict[str, tuple[int, float]] = {}
+UPLOAD_TICKETS_LOCK = Lock()
+# Exact routes that answer browser preflights; no other /api/uploads* path does.
+UPLOAD_CORS_PATHS = frozenset({"/api/upload", "/api/upload/ticket", "/api/upload/direct"})
+
+
+def upload_origins() -> set[str]:
+    """Exact browser origins allowed to call the direct upload endpoints.
+
+    Only configured production origins are accepted; a wildcard is never
+    honoured and the direct request uses no cookies, so a permissive origin can
+    never read another user's account data.
+    """
+    raw = os.getenv("RETAILMIND_UPLOAD_ORIGINS") or os.getenv("RETAILMIND_PUBLIC_ORIGIN") or ""
+    return {
+        item.strip().rstrip("/")
+        for item in raw.split(",")
+        if item.strip() and item.strip() != "*"
+    }
+
+
+def _ticket_key(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def issue_upload_ticket(user_id: int) -> tuple[str, int]:
+    token = secrets.token_urlsafe(32)
+    now = time.time()
+    with UPLOAD_TICKETS_LOCK:
+        for key, (_, expires) in list(UPLOAD_TICKETS.items()):
+            if expires <= now:
+                UPLOAD_TICKETS.pop(key, None)
+        UPLOAD_TICKETS[_ticket_key(token)] = (user_id, now + UPLOAD_TICKET_TTL_SECONDS)
+    return token, UPLOAD_TICKET_TTL_SECONDS
+
+
+def consume_upload_ticket(authorization: str | None) -> int:
+    """Validate and burn a single-use upload ticket, returning its owner id."""
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="A valid upload ticket is required.")
+    token = authorization[7:].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="A valid upload ticket is required.")
+    key = _ticket_key(token)
+    with UPLOAD_TICKETS_LOCK:
+        entry = UPLOAD_TICKETS.pop(key, None)
+    if entry is None:
+        raise HTTPException(status_code=401, detail="The upload ticket is invalid or has already been used.")
+    user_id, expires = entry
+    if expires <= time.time():
+        raise HTTPException(status_code=401, detail="The upload ticket has expired. Start the upload again.")
+    return user_id
+
+
+class UploadCORSMiddleware:
+    """Least-privilege CORS for the direct upload routes only.
+
+    Ordinary API traffic stays same-origin through the Next.js proxy. Only
+    ``/api/upload*`` answers cross-origin preflights, and only for the exact
+    configured origin. Cookies are not used, because the direct request is
+    authenticated by a request-scoped ticket header.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+        # Match the three direct-upload routes exactly; a lookalike prefix such
+        # as /api/uploads/... must not receive upload CORS headers.
+        path = str(scope.get("path", "")).rstrip("/") or "/"
+        if path not in UPLOAD_CORS_PATHS:
+            await self.app(scope, receive, send)
+            return
+
+        headers = Headers(scope=scope)
+        origin = headers.get("origin")
+        allowed = bool(origin) and origin.rstrip("/") in upload_origins()
+
+        if scope.get("method", "").upper() == "OPTIONS":
+            requested = headers.get("access-control-request-method", "")
+            if not allowed or requested.upper() != "POST":
+                await send({"type": "http.response.start", "status": 400, "headers": []})
+                await send({"type": "http.response.body", "body": b""})
+                return
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 204,
+                    "headers": [
+                        (b"access-control-allow-origin", origin.encode("latin-1")),
+                        (b"access-control-allow-methods", b"POST, OPTIONS"),
+                        (b"access-control-allow-headers", b"Authorization, Content-Type"),
+                        (b"access-control-max-age", b"600"),
+                        (b"vary", b"Origin"),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": b""})
+            return
+
+        async def send_with_cors(message):
+            if message.get("type") == "http.response.start" and allowed:
+                message = dict(message)
+                message["headers"] = list(message.get("headers", [])) + [
+                    (b"access-control-allow-origin", origin.encode("latin-1")),
+                    (b"vary", b"Origin"),
+                ]
+            await send(message)
+
+        await self.app(scope, receive, send_with_cors)
 
 
 @app.middleware("http")
@@ -94,6 +249,11 @@ async def response_diagnostics(request, call_next):
     if request.url.path.startswith("/api/") and request.url.path not in {"/api/health", "/api/ready"}:
         response.headers["Cache-Control"] = "private, no-store"
     return response
+
+
+# Added last so it wraps the diagnostics middleware and can answer preflights
+# before routing.
+app.add_middleware(UploadCORSMiddleware)
 
 
 def require_api_token(authorization: str | None = Header(default=None)) -> None:
@@ -110,12 +270,14 @@ def get_dataset(dataset_id: str, user_id: int) -> DatasetRecord:
 
     try:
         stored = auth_service().get_uploaded_file(user_id, dataset_id)
-        content = UploadStorage.from_environment(Path(__file__).resolve().parent).read(
+        content = storage_from_environment(Path(__file__).resolve().parent).read(
             user_id, str(stored["storage_key"]), str(stored["file_sha256"])
         )
         frame = read_uploaded_file(content, str(stored["original_filename"]))
     except AuthenticationError as error:
         raise HTTPException(status_code=404, detail="Dataset not found.") from error
+    except UploadStorageUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     except (UploadStorageError, ValueError, OSError) as error:
         raise HTTPException(status_code=422, detail="The saved dataset is unavailable or failed validation.") from error
 
@@ -363,7 +525,7 @@ def export_cleaned_dataset(
 def delete_dataset(dataset_id: str, user: UserProfile = Depends(require_authenticated_user)) -> dict[str, Any]:
     try:
         stored = auth_service().get_uploaded_file(user.id, dataset_id)
-        storage = UploadStorage.from_environment(Path(__file__).resolve().parent)
+        storage = storage_from_environment(Path(__file__).resolve().parent)
         storage.delete_and_forget(
             user.id,
             str(stored["storage_key"]),
@@ -371,48 +533,69 @@ def delete_dataset(dataset_id: str, user: UserProfile = Depends(require_authenti
         )
     except AuthenticationError as error:
         raise HTTPException(status_code=404, detail="Dataset not found.") from error
+    except UploadStorageUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     except UploadStorageError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     DATASETS.pop(dataset_id, None)
     return {"ok": True}
 
 
-@app.post("/api/upload", dependencies=[Depends(require_api_token)])
-async def upload_dataset(
-    file: UploadFile = File(...),
-    user: UserProfile = Depends(require_authenticated_user),
-) -> dict[str, Any]:
+async def _store_upload(file: UploadFile, user_id: int) -> dict[str, Any]:
+    """Validate, parse, persist, and describe one upload for ``user_id``.
+
+    Shared by the same-origin endpoint (cookie auth) and the direct endpoint
+    (ticket auth) so both paths enforce identical limits and tenant isolation.
+    """
     filename = file.filename or ""
     suffix = os.path.splitext(filename)[1].lower()
     if suffix not in SUPPORTED_EXTENSIONS:
         raise HTTPException(status_code=415, detail="Upload a CSV or Excel file (.csv, .xlsx, .xls, .xlsm).")
 
-    content = file.file.read(MAX_UPLOAD_BYTES + 1)
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="The existing upload limit is 25 MB.")
     if not content:
         raise HTTPException(status_code=400, detail="The selected file is empty.")
+    if suffix in EXCEL_EXTENSIONS and len(content) > MAX_EXCEL_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Excel workbooks are limited to {format_byte_limit(MAX_EXCEL_UPLOAD_BYTES)} on this server "
+                "because workbook parsing is CPU- and memory-intensive. Convert this file to CSV to upload "
+                "the full dataset."
+            ),
+        )
 
-    duplicates = duplicate_source_columns(content, filename)
+    # Parsing a workbook is CPU-bound. Keep it off the event loop so a large
+    # upload cannot block every other dashboard/analytics request.
+    duplicates = await asyncio.to_thread(duplicate_source_columns, content, filename)
     if duplicates:
         raise HTTPException(status_code=422, detail=f"Duplicate column names must be resolved first: {', '.join(duplicates)}")
     try:
-        frame = read_uploaded_file(content, filename)
+        frame = await asyncio.to_thread(read_uploaded_file, content, filename)
     except (ValueError, OSError, ImportError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     if frame.empty:
         raise HTTPException(status_code=422, detail="The file contains no data rows.")
 
-    mapping = detect_column_mapping(frame.columns)
+    mapping = await asyncio.to_thread(detect_column_mapping, list(frame.columns))
+    # Validate from the frame we already parsed instead of letting storage parse
+    # the same workbook a second time. This keeps one large frame in memory.
+    profile = await asyncio.to_thread(profile_data, frame, mapping)
+    if profile["errors"]:
+        raise HTTPException(status_code=422, detail=str(profile["errors"][0]))
+
     dataset_id = str(uuid4())
-    storage = UploadStorage.from_environment(Path(__file__).resolve().parent)
+    storage = storage_from_environment(Path(__file__).resolve().parent)
+    validated = ValidatedUpload(extension=suffix.lstrip("."), row_count=int(len(frame)))
     try:
         stored = storage.store_and_record(
-            user.id,
+            user_id,
             filename,
             content,
             lambda upload: auth_service().create_uploaded_file(
-                user.id,
+                user_id,
                 dataset_id,
                 upload.original_filename,
                 upload.file_type,
@@ -421,31 +604,35 @@ async def upload_dataset(
                 upload.size_bytes,
                 upload.storage_key,
             ),
+            validated=validated,
         )
+    except UploadStorageUnavailable as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
     except UploadStorageError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
     except AuthenticationError as error:
         raise HTTPException(status_code=503, detail=str(error)) from error
 
     try:
-        auth_service().record_upload(user.id, filename, stored.file_type, stored.sha256, stored.row_count, "valid")
+        auth_service().record_upload(user_id, filename, stored.file_type, stored.sha256, stored.row_count, "valid")
     except AuthenticationError as error:
         try:
             storage.delete_and_forget(
-                user.id,
+                user_id,
                 stored.storage_key,
-                lambda: auth_service().delete_uploaded_file(user.id, dataset_id),
+                lambda: auth_service().delete_uploaded_file(user_id, dataset_id),
             )
         except (AuthenticationError, UploadStorageError):
             pass
         raise HTTPException(status_code=503, detail=str(error)) from error
 
-    DATASETS[dataset_id] = DatasetRecord(owner_id=user.id, filename=filename, frame=frame, mapping=mapping)
+    DATASETS[dataset_id] = DatasetRecord(owner_id=user_id, filename=filename, frame=frame, mapping=mapping)
     while len(DATASETS) > DATASET_LIMIT:
         DATASETS.popitem(last=False)
 
-    profile = profile_schema(frame)
-    missing = frame.isna().sum()
+    profile = await asyncio.to_thread(profile_schema, frame)
+    missing = await asyncio.to_thread(lambda: frame.isna().sum())
+    duplicate_rows = await asyncio.to_thread(lambda: int(frame.duplicated().sum()))
     return {
         "dataset_id": dataset_id,
         "filename": filename,
@@ -458,10 +645,49 @@ async def upload_dataset(
         "quality": {
             "missing_cells": int(missing.sum()),
             "columns_with_missing_values": int((missing > 0).sum()),
-            "duplicate_rows": int(frame.duplicated().sum()),
+            "duplicate_rows": duplicate_rows,
         },
         "storage": "persistent",
     }
+
+
+@app.post("/api/upload", dependencies=[Depends(require_api_token)])
+async def upload_dataset(
+    file: UploadFile = File(...),
+    user: UserProfile = Depends(require_authenticated_user),
+) -> dict[str, Any]:
+    return await _store_upload(file, user.id)
+
+
+@app.post("/api/upload/ticket", dependencies=[Depends(require_api_token)])
+def create_upload_ticket(
+    response: Response,
+    user: UserProfile = Depends(require_authenticated_user),
+) -> dict[str, Any]:
+    """Mint a short-lived, single-use ticket for one direct upload.
+
+    A ticket is only obtainable with a valid session cookie through the
+    same-origin proxy, and it is bound to that user's id.
+    """
+    token, expires_in = issue_upload_ticket(user.id)
+    # Defence in depth: the diagnostics middleware already marks /api/* as
+    # private, but a bearer ticket must never be stored by a browser or cache.
+    response.headers["Cache-Control"] = "private, no-store"
+    return {"token": token, "expires_in": expires_in}
+
+
+@app.post("/api/upload/direct")
+async def upload_dataset_direct(
+    file: UploadFile = File(...),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Accept a file straight from the browser, authenticated by a ticket.
+
+    This bypasses the Netlify 6 MB buffered-proxy limit while reusing the exact
+    same validation, storage, and tenant checks as ``/api/upload``.
+    """
+    user_id = consume_upload_ticket(authorization)
+    return await _store_upload(file, user_id)
 
 
 @app.get("/api/goals/progress/{dataset_id}", dependencies=[Depends(require_api_token)])
@@ -999,6 +1225,9 @@ def visual_analytics(
     category: str | None = Query(default=None, max_length=200),
     city: str | None = Query(default=None, max_length=200),
     region: str | None = Query(default=None, max_length=200),
+    # ``Annotated`` keeps the schema constraint while giving a plain ``None``
+    # default when the function is called directly (e.g. from tests).
+    state: Annotated[str | None, Query(max_length=200)] = None,
 ) -> dict[str, Any]:
     """Return additive aggregates for every advanced chart type.
 
@@ -1013,6 +1242,7 @@ def visual_analytics(
         (category or "").casefold(),
         (city or "").casefold(),
         (region or "").casefold(),
+        (state or "").casefold(),
     )
     cached = record.visual_cache.get(cache_key)
     if cached is not None:
@@ -1031,7 +1261,9 @@ def visual_analytics(
             "available": False,
             "dataset_id": dataset_id,
             "dataset_name": record.filename,
-            "filters": {"category": [], "city": [], "region": []},
+            "filters": {"category": [], "city": [], "region": [], "state": []},
+            "states": [],
+            "state_source": "none",
             "notes": ["Map sales, profit, date, category, product, city, and order fields before using visual analytics."],
         }
 
@@ -1047,12 +1279,23 @@ def visual_analytics(
         frame = frame[mask]
         applied[field] = value
 
+    # A state filter is resolved through the same real gazetteer used by the
+    # map. It is applied to the city/region columns, never to a guessed value.
+    if state and state.casefold() != "all":
+        canonical_state = resolve_state_name(state)
+        if canonical_state is None:
+            raise HTTPException(status_code=422, detail=f"'{state}' is not a recognised Indian state.")
+        if "region" not in frame.columns and "city" not in frame.columns:
+            raise HTTPException(status_code=422, detail="The uploaded file has no mapped region or city field to filter by state.")
+        state_series, _sources = resolve_states(frame)
+        frame = frame[state_series == canonical_state]
+        applied["state"] = canonical_state
+
     if frame.empty:
         return {
             "available": False,
             "dataset_id": dataset_id,
             "dataset_name": record.filename,
-            "filters": {"category": [], "city": [], "region": []},
             "applied_filters": applied,
             "row_count": 0,
             "matched_rows": 0,
@@ -1060,7 +1303,10 @@ def visual_analytics(
                 "category": _visual_filter_options(option_frame, "category"),
                 "city": _visual_filter_options(option_frame, "city"),
                 "region": _visual_filter_options(option_frame, "region"),
+                "state": state_options(option_frame),
             },
+            "states": [],
+            "state_source": "none",
             "notes": ["No records match the selected filters."],
         }
 
@@ -1071,6 +1317,10 @@ def visual_analytics(
     product_rows = _visual_dimension_rows(frame, "product_name", limit=100)
     city_rows = _visual_dimension_rows(frame, "city", limit=100)
     region_rows = _visual_dimension_rows(frame, "region", limit=100)
+    state_rows = state_aggregate(frame)
+    state_sources = {row["source"] for row in state_rows if row.get("source")}
+    state_source = "none" if not state_rows else ("region" if state_sources == {"region"} else ("city" if state_sources == {"city"} else "region+city"))
+
     kpis = calculate_kpis(frame)
     for role, key in (("customer", "total_customers"), ("product_name", "total_products")):
         column = role if role in frame.columns else None
@@ -1090,12 +1340,16 @@ def visual_analytics(
             "category": _visual_filter_options(option_frame, "category"),
             "city": _visual_filter_options(option_frame, "city"),
             "region": _visual_filter_options(option_frame, "region"),
+            "state": state_options(option_frame),
         },
         "monthly": json_records(monthly_summary(frame).rename(columns={"month": "date"})),
         "categories": category_rows,
         "products": product_rows,
         "cities": city_rows,
         "regions": region_rows,
+        "states": state_rows,
+        "state_source": state_source,
+        "unmatched_regions": unmatched_state_labels(frame),
         "category_month": _visual_month_dimension(frame, "category"),
         "category_city": _visual_cross_rows(frame, "category", "city"),
         "region_month": _visual_month_dimension(frame, "region"),
@@ -1130,8 +1384,12 @@ def visual_analytics(
         "notes": [
             note
             for note in (
-                "State-level map values use the mapped region field; city markers use a bundled coordinate gazetteer and never infer a location for an unknown city."
-                if not region_rows else None,
+                "State map values were aggregated from the mapped city field using the bundled gazetteer because the region field holds sales zones, not states."
+                if state_source in {"city", "region+city"} else None,
+                "State map values use the mapped region field because every region value is a recognised state."
+                if state_source == "region" else None,
+                "No state-level map values are available: the region values are not states and no city matched the gazetteer."
+                if state_source == "none" and (region_rows or city_rows) else None,
                 "Geographic values are only those present in the uploaded dataset; unmatched locations are listed rather than estimated."
                 if region_rows or city_rows else None,
             )

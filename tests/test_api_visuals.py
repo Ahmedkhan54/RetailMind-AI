@@ -85,7 +85,7 @@ def dataset(monkeypatch):
 
 def call(**kwargs):
     dataset_id = kwargs.pop("dataset_id", DATASET_ID)
-    options = {"date_from": None, "date_to": None, "category": None, "city": None, "region": None}
+    options = {"date_from": None, "date_to": None, "category": None, "city": None, "region": None, "state": None}
     options.update(kwargs)
     return retailmind_api.visual_analytics(dataset_id=dataset_id, user=USER, **options)
 
@@ -205,3 +205,71 @@ def test_concurrent_dataset_isolation(dataset, monkeypatch):
     theirs = call(dataset_id=other_id)
     assert own["kpis"]["total_sales"] != theirs["kpis"]["total_sales"]
     assert theirs["kpis"]["total_sales"] == pytest.approx(own["kpis"]["total_sales"] * 2)
+
+
+def totals_by_state(frame: pd.DataFrame) -> dict[str, float]:
+    """Expected sales per real state, derived from the fixture cities by hand."""
+    expected: dict[str, float] = {}
+    for city, sales in zip(frame["City"], frame["Sales"]):
+        state = {"Delhi": "Delhi", "Pune": "Maharashtra", "Mumbai": "Maharashtra"}[city]
+        expected[state] = expected.get(state, 0.0) + float(sales)
+    return expected
+
+
+def test_states_are_derived_from_real_city_values(dataset):
+    payload = call()
+    expected = totals_by_state(dataset)
+    rows = {row["state"]: row for row in payload["states"]}
+    assert set(rows) == set(expected)
+    for state, sales in expected.items():
+        assert rows[state]["sales"] == pytest.approx(sales)
+        assert rows[state]["source"] == "city"
+    assert payload["state_source"] == "city"
+    assert set(payload["filters"]["state"]) == set(expected)
+    # Sales zones are preserved for the region filter and never painted as states.
+    assert set(payload["filters"]["region"]) == {"North", "West"}
+
+
+def test_state_filter_narrows_to_the_resolved_state(dataset):
+    payload = call(state="Maharashtra")
+    expected_rows = dataset[dataset["City"].isin(["Pune", "Mumbai"])]
+    assert payload["matched_rows"] == len(expected_rows)
+    assert payload["kpis"]["total_sales"] == pytest.approx(float(expected_rows["Sales"].sum()))
+    assert payload["applied_filters"] == {"state": "Maharashtra"}
+    assert {row["state"] for row in payload["states"]} == {"Maharashtra"}
+
+
+def test_state_filter_rejects_a_sales_zone(dataset):
+    with pytest.raises(HTTPException) as error:
+        call(state="West")
+    assert error.value.status_code == 422
+    assert "recognised indian state" in error.value.detail.lower()
+
+
+def test_unmatched_region_labels_report_real_sales(dataset):
+    payload = call()
+    unmatched = {row["label"]: row["sales"] for row in payload["unmatched_regions"]}
+    assert set(unmatched) == {"North", "West"}
+    for region in unmatched:
+        assert unmatched[region] == pytest.approx(float(dataset[dataset["Region"] == region]["Sales"].sum()))
+
+
+def test_region_that_is_a_state_takes_precedence_over_the_city(monkeypatch):
+    frame = fixture_frame().assign(Region="Gujarat", City="Pune")
+    monkeypatch.setitem(retailmind_api.DATASETS, DATASET_ID, fixture_record(frame))
+    payload = call()
+    assert payload["state_source"] == "region"
+    assert [row["state"] for row in payload["states"]] == ["Gujarat"]
+    assert payload["states"][0]["sales"] == pytest.approx(float(frame["Sales"].sum()))
+    assert payload["unmatched_regions"] == []
+
+
+def test_states_are_empty_when_nothing_can_be_resolved(monkeypatch):
+    frame = fixture_frame().assign(City="Atlantis")
+    monkeypatch.setitem(retailmind_api.DATASETS, DATASET_ID, fixture_record(frame, map_region=False))
+    payload = call()
+    assert payload["states"] == []
+    assert payload["state_source"] == "none"
+    assert payload["filters"]["state"] == []
+    assert payload["available"] is True
+    assert payload["notes"]

@@ -5,6 +5,7 @@ import { AnalyticsDateFilter } from "@/components/analytics-date-filter";
 import { useChartAnimation, useAnimationPreference } from "@/lib/animation-preference";
 import { AnimatedNumber } from "@/components/ui/animated-number";
 import { formatCompactCurrency, formatCurrency, formatCurrencyPrecise, formatDate, formatNumber, formatPercent } from "@/lib/format";
+import { uploadWithRetry as runUploadWithRetry, type UploadTicket } from "@/lib/upload-retry";
 import useSWR, { useSWRConfig } from "swr";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -218,9 +219,24 @@ const CLEANING_LABELS: Record<string, string> = {
   fill_invalid_numeric_zero: "Replace invalid numbers with zero",
 };
 
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+const UPLOAD_TIMEOUT_MS = 180000;
+
+function describeUploadFailure(status: number, detail: string | undefined): string {
+  if (status === 401) return "Your session or upload ticket expired before the upload finished. Sign in again, then retry — the file was not stored.";
+  if (status === 413) return "The upload is larger than the server accepts. Split the workbook or reduce the row count, then retry. The original file was not stored.";
+  if (status === 415) return "That file type is not supported. Use a CSV or Excel workbook (.csv, .xlsx, .xls, .xlsm).";
+  if (status === 422) return detail || "The file could not be parsed. Check the column headers, remove merged cells, and retry.";
+  if (status === 502 || status === 503 || status === 504) return "The analytics service is unavailable right now. Wait a moment and retry. The file was not processed.";
+  if (status >= 500) return detail || "The analytics service returned an unexpected error. Retry once; if it persists, check the backend logs.";
+  return detail || "The upload could not be completed. Check the file and retry.";
+}
+
 function UploadPage({ item }: { item: NavigationItem }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const uploadInFlight = useRef(false);
   const router = useRouter();
+  const { mutate } = useSWRConfig();
   const { dataset, setDataset, refreshDatasets } = useDataset();
   const { data: historyData, error: historyError, isLoading: historyLoading, mutate: refreshHistory } = useSWR<{ history: UploadHistoryRow[] }>("/api/retailmind/datasets/history", fetchJson);
   const { data: cleaningReview, error: cleaningReviewError, isLoading: cleaningReviewLoading, mutate: refreshCleaningReview } = useSWR<CleaningReview>(dataset ? `/api/retailmind/datasets/${encodeURIComponent(dataset.id)}/cleaning` : null, fetchJson);
@@ -249,7 +265,7 @@ function UploadPage({ item }: { item: NavigationItem }) {
       setMessageIsError(true);
       return;
     }
-    if (candidate.size > 25 * 1024 * 1024) {
+    if (candidate.size > MAX_UPLOAD_BYTES) {
       setFile(null);
       setMessage("This file is larger than the existing 25 MB upload limit.");
       setMessageIsError(true);
@@ -257,7 +273,11 @@ function UploadPage({ item }: { item: NavigationItem }) {
     }
     setFile(candidate);
     setProgress(0);
-    setMessage("File selected and ready for server-side validation and account storage.");
+    setMessage(
+      candidate.size > 6 * 1024 * 1024
+        ? `File selected (${(candidate.size / 1024 / 1024).toFixed(1)} MB). This file will upload directly to the analytics service, not through the Netlify proxy.`
+        : "File selected and ready for server-side validation and account storage.",
+    );
     setMessageIsError(false);
   }
 
@@ -348,41 +368,93 @@ function UploadPage({ item }: { item: NavigationItem }) {
     }
   }
 
+  async function requestUploadTicket(): Promise<UploadTicket> {
+    let response: Response;
+    try {
+      response = await fetch("/api/retailmind/upload-ticket", { method: "POST", cache: "no-store" });
+    } catch {
+      throw new Error("The upload service could not be reached. Check your connection and retry.");
+    }
+    let payload: (Partial<UploadTicket> & { detail?: string }) | null = null;
+    try { payload = await response.json(); } catch { payload = null; }
+    if (!response.ok || !payload?.token || !payload.upload_url) {
+      throw new Error(describeUploadFailure(response.status, payload?.detail));
+    }
+    return { token: payload.token, upload_url: payload.upload_url };
+  }
+
+  function uploadOnce(candidate: File, ticket: UploadTicket): Promise<UploadResponse> {
+    return new Promise<UploadResponse>((resolve, reject) => {
+      const request = new XMLHttpRequest();
+      const formData = new FormData();
+      formData.append("file", candidate);
+      // Direct request: the file goes to the backend, not the Netlify proxy.
+      request.open("POST", ticket.upload_url);
+      // The ticket authorises this one request. Never send the session cookie
+      // cross-origin, and never set Content-Type manually so the browser keeps
+      // the multipart boundary intact.
+      request.setRequestHeader("Authorization", `Bearer ${ticket.token}`);
+      request.timeout = UPLOAD_TIMEOUT_MS;
+      request.upload.onprogress = (event) => {
+        if (event.lengthComputable) setProgress(Math.max(1, Math.round((event.loaded / event.total) * 95)));
+      };
+      request.onload = () => {
+        let payload: (UploadResponse & { detail?: string }) | null = null;
+        try { payload = JSON.parse(request.responseText) as UploadResponse & { detail?: string }; }
+        catch { payload = null; }
+        if (request.status < 200 || request.status >= 300) {
+          reject(new Error(describeUploadFailure(request.status, payload?.detail)));
+          return;
+        }
+        if (!payload || !payload.dataset_id) {
+          reject(new Error("The server accepted the request but returned no dataset id. Retry; if it persists, check the backend logs."));
+          return;
+        }
+        resolve(payload);
+      };
+      request.onerror = () => reject(new Error("The direct upload connection was interrupted before the server replied. Check your connection and retry."));
+      request.ontimeout = () => reject(new Error("The upload timed out after 3 minutes. Large workbooks can take a while on a cold backend — wait a moment and retry."));
+      request.onabort = () => reject(new Error("The upload was cancelled."));
+      request.send(formData);
+    });
+  }
+
+  function uploadWithRetry(candidate: File): Promise<UploadResponse> {
+    return runUploadWithRetry<UploadResponse>({
+      // A ticket is single-use, so every attempt (including a retry) mints a
+      // fresh one. This also prevents replaying a consumed ticket.
+      requestTicket: requestUploadTicket,
+      uploadOnce: (ticket) => uploadOnce(candidate, ticket),
+      // Reset the bar at the start of every attempt so a retry does not inherit
+      // the aborted attempt's percentage.
+      onAttemptStart: () => setProgress(0),
+      onRetry: () => setMessage("The first attempt did not reach the server. Retrying once…"),
+      wait: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    });
+  }
+
   async function processFile() {
-    if (!file || uploading) return;
+    // A synchronous guard stops a double-click from starting two uploads
+    // before React has re-rendered the disabled button.
+    if (!file || uploadInFlight.current) return;
+    uploadInFlight.current = true;
     setUploading(true);
     setProgress(0);
     setMessage("Uploading and profiling your dataset with the Python backend…");
     setMessageIsError(false);
-    const formData = new FormData();
-    formData.append("file", file);
+    const candidate = file;
     try {
-      const result = await new Promise<UploadResponse>((resolve, reject) => {
-        const request = new XMLHttpRequest();
-        request.open("POST", "/api/retailmind/upload");
-        request.upload.onprogress = (event) => {
-          if (event.lengthComputable) setProgress(Math.round((event.loaded / event.total) * 100));
-        };
-        request.onload = () => {
-          let payload: UploadResponse & { detail?: string };
-          try { payload = JSON.parse(request.responseText) as UploadResponse & { detail?: string }; }
-          catch { reject(new Error("The Python API returned an unreadable response.")); return; }
-          if (request.status < 200 || request.status >= 300) {
-            reject(new Error(payload.detail || "The Python API could not process this file."));
-            return;
-          }
-          resolve(payload);
-        };
-        request.onerror = () => reject(new Error("The Python API could not be reached."));
-        request.onabort = () => reject(new Error("The upload was cancelled."));
-        request.send(formData);
-      });
+      const result = await uploadWithRetry(candidate);
       setProgress(100);
       setDataset({ id: result.dataset_id, filename: result.filename, uploadedAt: new Date().toISOString(), rows: result.row_count, columns: result.columns, preview: result.preview, mapping: result.mapping, profile: result.profile, quality: result.quality });
-      await Promise.all([refreshDatasets(), refreshHistory()]);
+      await Promise.all([
+        refreshDatasets(),
+        refreshHistory(),
+        mutate((key) => typeof key === "string" && (key.includes("/dashboard/overview/") || key.includes("/visuals/")), undefined, { revalidate: true }),
+      ]);
       const salesDetected = Boolean(result.mapping.sales);
       setMessage(salesDetected
-        ? "Dataset processed and saved to your account."
+        ? `Dataset "${result.filename}" processed and saved to your account. Opening the dashboard…`
         : "The file was uploaded, but no Sales/Revenue column was detected. Map the Sales column below and apply the mapping to continue.");
       setMessageIsError(!salesDetected);
       setFile(null);
@@ -392,6 +464,7 @@ function UploadPage({ item }: { item: NavigationItem }) {
       setMessage(error instanceof Error ? error.message : "The Python API could not process this file.");
       setMessageIsError(true);
     } finally {
+      uploadInFlight.current = false;
       setUploading(false);
     }
   }
@@ -403,7 +476,7 @@ function UploadPage({ item }: { item: NavigationItem }) {
         <Card className="panel-card upload-card">
           <CardHeader>
             <CardTitle className="panel-title">Upload a dataset</CardTitle>
-            <p className="panel-subtitle">CSV and Excel files up to 25 MB are supported by the existing backend.</p>
+            <p className="panel-subtitle">CSV files up to 25 MB; Excel workbooks up to 5 MB in production (convert larger sheets to CSV).</p>
           </CardHeader>
           <CardContent>
             <input ref={inputRef} className="sr-only" type="file" accept=".csv,.xlsx,.xls,.xlsm,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel,application/vnd.ms-excel.sheet.macroEnabled.12" aria-label="Choose a CSV or Excel dataset" onChange={handleFileChange} />
@@ -420,7 +493,7 @@ function UploadPage({ item }: { item: NavigationItem }) {
             >
               <span className="upload-icon"><CloudUpload aria-hidden="true" /></span>
               <strong>Drop your file here, or <span>browse</span></strong>
-              <span className="upload-hint">CSV, XLS, XLSX, or XLSM · maximum 25 MB</span>
+              <span className="upload-hint">CSV up to 25 MB · Excel workbooks up to 5 MB in production</span>
             </div>
             {file ? (
               <div className="selected-file">
