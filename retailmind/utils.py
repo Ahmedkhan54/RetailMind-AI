@@ -14,6 +14,16 @@ import pandas as pd
 CURRENCY = "₹"
 
 _CURRENCY_CHARS = re.compile(r"[₹$€£¥₩₽,\s\u00a0%]")
+# Currency codes that may legitimately precede a number ("Rs. 1,200",
+# "INR 4500", "USD100").  Deliberately an allowlist: stripping *any* short
+# letter prefix turned identifiers such as "P0", "C001" or "O0001" into
+# numbers, which misclassified SKU/customer/order codes as measures and then
+# wiped them during numeric coercion.
+_CURRENCY_CODES = (
+    "Rs|INR|USD|EUR|GBP|AED|SAR|JPY|CNY|CAD|AUD|SGD|CHF|NZD|ZAR|MYR|THB|IDR|"
+    "PHP|VND|BDT|PKR|LKR|NPR"
+)
+_CURRENCY_PREFIX = re.compile(rf"^(?:{_CURRENCY_CODES})\.?\s*(?=[0-9])", re.IGNORECASE)
 
 
 def to_numeric_loose(values: Any) -> pd.Series:
@@ -35,7 +45,9 @@ def to_numeric_loose(values: Any) -> pd.Series:
     cleaned = text.str.replace(r"^\(\s*(.*?)\s*\)$", r"\1", regex=True)
     cleaned = cleaned.str.replace(_CURRENCY_CHARS, "", regex=True)
     # Prefixes such as ``Rs.``, ``INR`` or ``USD`` may include a trailing dot.
-    cleaned = cleaned.str.replace(r"^[A-Za-z]{1,4}\s*\.?\s*(?=[0-9])", "", regex=True)
+    # Only recognised currency codes are removed so alphanumeric identifiers
+    # keep their meaning.
+    cleaned = cleaned.str.replace(_CURRENCY_PREFIX, "", regex=True)
     cleaned = cleaned.str.replace(r"(?<=[0-9])\s*[A-Za-z]{1,4}$", "", regex=True)
     numeric = pd.to_numeric(cleaned, errors="coerce")
     # Keep the original parse when the loose form found nothing at all; this

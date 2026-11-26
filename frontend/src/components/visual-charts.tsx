@@ -46,14 +46,14 @@ import {
 } from "@/components/ui/table";
 
 export const VISUAL_COLORS = [
-  "#173b73",
-  "#2f65a7",
-  "#4b83d5",
-  "#8fb4e8",
+  "#1e5233",
+  "#2d7a52",
+  "#4caf7a",
+  "#81c784",
   "#d9a41a",
-  "#6f83a2",
-  "#c7d5e8",
-  "#a6c4f1",
+  "#6b7d72",
+  "#c8e6c9",
+  "#a5d6a7",
 ];
 
 type Row = Record<string, unknown>;
@@ -133,19 +133,19 @@ export function ComparisonBarChart({
           layout={horizontal ? "vertical" : "horizontal"}
           margin={{ top: 10, right: 12, bottom: 4, left: horizontal ? 8 : 0 }}
         >
-          <CartesianGrid stroke="#edf0f5" strokeDasharray="3 4" vertical={horizontal} horizontal={!horizontal} />
+          <CartesianGrid stroke="#e8f0ea" strokeDasharray="3 4" vertical={horizontal} horizontal={!horizontal} />
           {horizontal ? (
             <>
-              <XAxis type="number" tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} tickFormatter={compact} />
-              <YAxis type="category" dataKey="label" width={106} tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} tickFormatter={(value: string) => shortLabel(value, 16)} />
+              <XAxis type="number" tickLine={false} axisLine={false} tick={{ fill: "#6b7d72", fontSize: 11 }} tickFormatter={compact} />
+              <YAxis type="category" dataKey="label" width={106} tickLine={false} axisLine={false} tick={{ fill: "#6b7d72", fontSize: 11 }} tickFormatter={(value: string) => shortLabel(value, 16)} />
             </>
           ) : (
             <>
-              <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} tickFormatter={(value: string) => shortLabel(value, 13)} interval={0} angle={data.length > 6 ? -18 : 0} textAnchor={data.length > 6 ? "end" : "middle"} height={data.length > 6 ? 52 : 30} />
-              <YAxis tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} tickFormatter={compact} />
+              <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: "#6b7d72", fontSize: 11 }} tickFormatter={(value: string) => shortLabel(value, 13)} interval={0} angle={data.length > 6 ? -18 : 0} textAnchor={data.length > 6 ? "end" : "middle"} height={data.length > 6 ? 52 : 30} />
+              <YAxis tickLine={false} axisLine={false} tick={{ fill: "#6b7d72", fontSize: 11 }} tickFormatter={compact} />
             </>
           )}
-          <Tooltip formatter={(value) => formatCurrency(Number(value))} cursor={{ fill: "#f4f7fb" }} />
+          <Tooltip formatter={(value) => formatCurrency(Number(value))} cursor={{ fill: "#f2f8f4" }} />
           <Legend verticalAlign="top" height={28} iconType="circle" wrapperStyle={{ fontSize: 11 }} />
           <Bar dataKey="primary" name={primaryName} stackId={stacked ? "measures" : undefined} fill={VISUAL_COLORS[1]} radius={stacked ? 0 : [4, 4, 0, 0]} barSize={stacked ? 18 : 12} onClick={handleSelect} cursor={onSelect ? "pointer" : undefined} isAnimationActive={animation.isAnimationActive} animationDuration={animation.animationDuration} animationEasing={animation.animationEasing} />
           {secondaryKey ? (
@@ -200,9 +200,9 @@ export function TrendChart({
   };
   const axes = (
     <>
-      <CartesianGrid stroke="#edf0f5" strokeDasharray="3 4" vertical={false} />
-      <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} tickFormatter={dateTick} minTickGap={20} />
-      <YAxis tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} tickFormatter={compact} />
+      <CartesianGrid stroke="#e8f0ea" strokeDasharray="3 4" vertical={false} />
+      <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: "#6b7d72", fontSize: 11 }} tickFormatter={dateTick} minTickGap={20} />
+      <YAxis tickLine={false} axisLine={false} tick={{ fill: "#6b7d72", fontSize: 11 }} tickFormatter={compact} />
       <Tooltip formatter={(value) => formatCurrency(Number(value))} labelFormatter={(value) => {
         const date = new Date(String(value));
         return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleDateString("en-IN", { month: "long", year: "numeric" });
@@ -423,11 +423,11 @@ export function SalesProfitScatter({
     <div className="visual-chart" style={{ height }}>
       <ResponsiveContainer width="100%" height="100%">
         <ScatterChart key={animation.isAnimationActive ? "animated" : "static"} margin={{ top: 16, right: 18, bottom: 8, left: 4 }} accessibilityLayer>
-          <CartesianGrid stroke="#edf0f5" strokeDasharray="3 4" />
-          <XAxis type="number" dataKey="x" name="Sales" tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} tickFormatter={compact} />
-          <YAxis type="number" dataKey="y" name="Profit" tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} tickFormatter={compact} />
+          <CartesianGrid stroke="#e8f0ea" strokeDasharray="3 4" />
+          <XAxis type="number" dataKey="x" name="Sales" tickLine={false} axisLine={false} tick={{ fill: "#6b7d72", fontSize: 11 }} tickFormatter={compact} />
+          <YAxis type="number" dataKey="y" name="Profit" tickLine={false} axisLine={false} tick={{ fill: "#6b7d72", fontSize: 11 }} tickFormatter={compact} />
           <ZAxis type="number" dataKey="z" range={[50, 420]} />
-          <ReferenceLine y={0} stroke="#c3ccd9" strokeDasharray="4 4" />
+          <ReferenceLine y={0} stroke="#b7cdbd" strokeDasharray="4 4" />
           <Tooltip
             cursor={{ strokeDasharray: "3 3" }}
             formatter={(value, name) => [formatCurrency(Number(value)), String(name)]}
@@ -640,9 +640,9 @@ export function HistogramChart({ bins, height = 280 }: { bins: HistogramBin[]; h
     <div className="visual-chart" style={{ height }}>
       <ResponsiveContainer width="100%" height="100%">
         <BarChart key={animation.isAnimationActive ? "animated" : "static"} data={bins} margin={{ top: 10, right: 10, bottom: 22, left: 0 }}>
-          <CartesianGrid stroke="#edf0f5" strokeDasharray="3 4" vertical={false} />
-          <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} angle={-18} textAnchor="end" height={44} interval={0} />
-          <YAxis allowDecimals={false} tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} />
+          <CartesianGrid stroke="#e8f0ea" strokeDasharray="3 4" vertical={false} />
+          <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: "#6b7d72", fontSize: 11 }} angle={-18} textAnchor="end" height={44} interval={0} />
+          <YAxis allowDecimals={false} tickLine={false} axisLine={false} tick={{ fill: "#6b7d72", fontSize: 11 }} />
           <Tooltip formatter={(value) => [`${formatNumber(Number(value), 0)} records`, "Count"]} />
           <Bar dataKey="count" name="Records" fill={VISUAL_COLORS[2]} radius={[3, 3, 0, 0]} isAnimationActive={animation.isAnimationActive} animationDuration={animation.animationDuration} animationEasing={animation.animationEasing} />
         </BarChart>
@@ -694,10 +694,10 @@ export function ParetoChart({ rows, height = 300, onSelect }: { rows: ParetoRow[
     <div className="visual-chart" style={{ height }}>
       <ResponsiveContainer width="100%" height="100%">
         <ComposedChart key={animation.isAnimationActive ? "animated" : "static"} data={data} margin={{ top: 12, right: 8, bottom: 38, left: 0 }}>
-          <CartesianGrid stroke="#edf0f5" strokeDasharray="3 4" vertical={false} />
-          <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} angle={-20} textAnchor="end" height={54} interval={0} tickFormatter={(value: string) => shortLabel(value, 12)} />
-          <YAxis yAxisId="sales" tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} tickFormatter={compact} />
-          <YAxis yAxisId="share" orientation="right" domain={[0, 100]} tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} tickFormatter={(value: number) => `${value}%`} />
+          <CartesianGrid stroke="#e8f0ea" strokeDasharray="3 4" vertical={false} />
+          <XAxis dataKey="label" tickLine={false} axisLine={false} tick={{ fill: "#6b7d72", fontSize: 11 }} angle={-20} textAnchor="end" height={54} interval={0} tickFormatter={(value: string) => shortLabel(value, 12)} />
+          <YAxis yAxisId="sales" tickLine={false} axisLine={false} tick={{ fill: "#6b7d72", fontSize: 11 }} tickFormatter={compact} />
+          <YAxis yAxisId="share" orientation="right" domain={[0, 100]} tickLine={false} axisLine={false} tick={{ fill: "#6b7d72", fontSize: 11 }} tickFormatter={(value: number) => `${value}%`} />
           <Tooltip formatter={(value, name) => [name === "Cumulative" ? formatPercent(Number(value)) : formatCurrency(Number(value)), String(name)]} />
           <Legend verticalAlign="top" height={26} iconType="circle" wrapperStyle={{ fontSize: 11 }} />
           <Bar yAxisId="sales" dataKey="sales" name="Sales" fill={VISUAL_COLORS[1]} radius={[3, 3, 0, 0]} onClick={(entry: unknown) => {
@@ -747,7 +747,7 @@ export function HeatmapMatrix({ rows, onSelect, valueLabel = "Sales" }: { rows: 
                 key={col}
                 role="cell"
                 className="heatmap-cell"
-                style={{ background: value ? `rgba(47, 101, 167, ${alpha.toFixed(3)})` : "transparent", color: alpha > 0.62 ? "#ffffff" : "#24324a" }}
+                style={{ background: value ? `rgba(30, 82, 51, ${alpha.toFixed(3)})` : "transparent", color: alpha > 0.62 ? "#ffffff" : "#24352c" }}
                 title={`${rowLabel} · ${col}: ${formatCurrency(value)}`}
               >
                 {value ? formatCompactCurrency(value) : "—"}

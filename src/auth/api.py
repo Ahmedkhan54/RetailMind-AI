@@ -4,7 +4,9 @@ from pathlib import Path
 from dataclasses import asdict
 from datetime import date
 import json
+import logging
 import os
+from urllib.parse import quote
 from threading import Lock
 from typing import Any, Literal
 
@@ -14,6 +16,10 @@ from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, Field
 
 from .service import AuthService, AuthenticationError, UserProfile
+from .email import EmailDeliveryError, send_account_email
+from src.storage import UploadStorageError, UploadStorageUnavailable, storage_from_environment
+
+logger = logging.getLogger(__name__)
 
 COOKIE_NAME = "retailmind_session"
 SESSION_LIFETIME_SECONDS = 8 * 60 * 60
@@ -195,6 +201,24 @@ class PasswordUpdate(BaseModel):
     new_password: str = Field(min_length=12, max_length=1024)
 
 
+class AccountDeletionRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=1024)
+    confirmation: Literal["DELETE MY ACCOUNT"]
+
+
+class PasswordResetRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=254)
+
+
+class PasswordResetConfirm(BaseModel):
+    token: str = Field(min_length=32, max_length=512)
+    new_password: str = Field(min_length=12, max_length=1024)
+
+
+class VerificationRequest(BaseModel):
+    token: str = Field(min_length=32, max_length=512)
+
+
 class GoalInput(BaseModel):
     id: int | None = Field(default=None, gt=0)
     goal_name: str = Field(min_length=1, max_length=150)
@@ -221,6 +245,42 @@ class PreferencesInput(BaseModel):
 router = APIRouter(prefix="/api", dependencies=[Depends(require_api_token)])
 
 
+def _public_frontend_url(path: str, token: str) -> str:
+    origin = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
+    if not origin.startswith(("https://", "http://localhost", "http://127.0.0.1")):
+        raise AuthenticationError("The account email link is not configured.")
+    separator = "&" if "?" in path else "?"
+    return f"{origin}{path}{separator}token={quote(token, safe='')}"
+
+
+def _deliver_account_action(action, *, purpose: str) -> bool:
+    """Email only after a token is persisted; token and credentials are never logged."""
+    if action is None:
+        return False
+    try:
+        if purpose == "password_reset":
+            send_account_email(
+                recipient=action.user.email, subject="Reset your RetailMind AI password",
+                heading="Reset your password", body="We received a request to reset your RetailMind AI password. This link expires in 24 hours and can be used once.",
+                action_label="Reset password", action_url=_public_frontend_url("/login?action=password-reset", action.raw),
+            )
+        else:
+            send_account_email(
+                recipient=action.user.email, subject="Confirm your RetailMind AI account",
+                heading=f"Welcome to RetailMind AI, {action.user.full_name}", body="Your account was created successfully. Confirm your email address to complete account setup. This link expires in 24 hours and can be used once.",
+                action_label="Confirm email", action_url=_public_frontend_url("/login?action=email-verification", action.raw),
+            )
+        auth_service().record_activity(action.user.id, "account_email_sent")
+        return True
+    except (EmailDeliveryError, AuthenticationError):
+        logger.warning("Account email delivery unavailable for %s", purpose)
+        try:
+            auth_service().record_activity(action.user.id, "account_email_failed", "failure")
+        except AuthenticationError:
+            pass
+        return False
+
+
 @router.post("/auth/login")
 def login(payload: LoginRequest, response: Response) -> dict:
     service = auth_service()
@@ -244,7 +304,60 @@ def register(payload: RegistrationRequest, response: Response) -> dict:
     except AuthenticationError as error:
         _raise_auth_error(error)
     _set_session_cookie(response, session.id, session.secret)
-    return {"user": _safe_profile(user), "role": service.get_current_role(user.id)}
+    # This is deliberately registration-only: normal sign-in never sends a welcome email.
+    # Welcome mail is best effort. The account and its session already exist at
+    # this point, so a token-store or SMTP failure must not turn a successful
+    # registration into a 500 that leaves the client without a session.
+    try:
+        action = service.issue_account_action_token(user.email, "email_verification", min_interval_seconds=0)
+        email_sent = _deliver_account_action(action, purpose="email_verification")
+    except AuthenticationError:
+        logger.warning(
+            "Registration succeeded but the verification email could not be issued; "
+            "check the account_action_tokens table and SMTP configuration.",
+        )
+        email_sent = False
+    return {"user": _safe_profile(user), "role": service.get_current_role(user.id), "email_confirmation_sent": email_sent}
+
+
+@router.post("/auth/password-reset/request")
+def request_password_reset(payload: PasswordResetRequest) -> dict:
+    service = auth_service()
+    try:
+        action = service.issue_account_action_token(payload.email, "password_reset")
+    except AuthenticationError as error:
+        _raise_auth_error(error, fallback_status=503)
+    _deliver_account_action(action, purpose="password_reset")
+    # Identical response for unknown, throttled, and existing accounts prevents enumeration.
+    return {"ok": True, "message": "If an account exists for that email, a password reset link has been sent."}
+
+
+@router.post("/auth/password-reset/confirm")
+def confirm_password_reset(payload: PasswordResetConfirm) -> dict:
+    try:
+        auth_service().reset_password_with_token(payload.token, payload.new_password)
+    except AuthenticationError as error:
+        _raise_auth_error(error)
+    return {"ok": True, "message": "Password updated. Sign in with your new password."}
+
+
+@router.post("/auth/email-verification/confirm")
+def confirm_email_verification(payload: VerificationRequest) -> dict:
+    try:
+        auth_service().verify_email_token(payload.token)
+    except AuthenticationError as error:
+        _raise_auth_error(error)
+    return {"ok": True, "message": "Your email address has been confirmed."}
+
+
+@router.post("/auth/email-verification/resend")
+def resend_email_verification(payload: PasswordResetRequest) -> dict:
+    try:
+        action = auth_service().issue_account_action_token(payload.email, "email_verification")
+    except AuthenticationError as error:
+        _raise_auth_error(error, fallback_status=503)
+    _deliver_account_action(action, purpose="email_verification")
+    return {"ok": True, "message": "If an account exists for that email, a confirmation link has been sent."}
 
 
 @router.get("/auth/session")
@@ -294,6 +407,37 @@ def update_password(
         _raise_auth_error(error)
     _clear_session_cookie(response)
     return {"ok": True, "message": "Password updated. Sign in again with your new password."}
+
+
+@router.delete("/auth/account")
+def delete_account(
+    payload: AccountDeletionRequest,
+    response: Response,
+    user: UserProfile = Depends(require_authenticated_user),
+) -> dict:
+    """Delete only the authenticated non-owner account; this route is never a GET."""
+    try:
+        deleted = auth_service().delete_own_account(user.id, payload.current_password)
+    except AuthenticationError as error:
+        _raise_auth_error(error)
+
+    cleanup_complete = True
+    try:
+        storage = storage_from_environment(Path(__file__).resolve().parents[2])
+        for storage_key in deleted.storage_keys:
+            storage.delete(user.id, storage_key)
+    except (UploadStorageError, UploadStorageUnavailable, OSError):
+        # The database transaction has already completed. Do not recreate an
+        # account or leak storage details; production operators must purge the
+        # now-unreferenced private object using storage lifecycle controls.
+        cleanup_complete = False
+        logger.error("Account deleted but one or more private upload objects need cleanup")
+    _clear_session_cookie(response)
+    return {
+        "ok": True,
+        "message": "Your account has been permanently deleted.",
+        "file_cleanup_complete": cleanup_complete,
+    }
 
 
 @router.get("/owner-admin/overview")

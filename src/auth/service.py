@@ -26,6 +26,9 @@ SAFE_AUDIT_EVENTS = frozenset({
     "persistent_upload_deleted", "report_generated", "report_downloaded", "report_saved",
     "report_deleted", "goal_saved", "goal_deleted", "profile_updated", "password_changed",
     "owner_admin_dashboard_accessed", "owner_admin_assigned",
+    "password_reset_requested", "password_reset_completed", "email_verification_requested",
+    "email_verified", "account_email_sent", "account_email_failed",
+    "account_deleted",
 })
 _PROFILE_FIELDS = (
     "id", "email", "full_name", "phone", "account_status", "session_version",
@@ -67,6 +70,18 @@ class UserSession:
     id: str
     secret: str
     expires_at: datetime
+
+
+@dataclass(frozen=True)
+class AccountActionToken:
+    raw: str
+    user: UserProfile
+
+
+@dataclass(frozen=True)
+class DeletedAccount:
+    """The only external-storage identifiers needed after a DB deletion commits."""
+    storage_keys: tuple[str, ...]
 
 
 def normalise_email(email: str) -> str:
@@ -504,6 +519,119 @@ class AuthService:
         except Exception as error:
             connection.rollback(); logger.exception("Password change failed")
             raise AuthenticationError("We could not change the password. Please try again.") from error
+        finally:
+            cursor.close(); connection.close()
+
+    def delete_own_account(self, user_id: int, current_password: str) -> DeletedAccount:
+        """Permanently remove a non-owner account after a password re-check.
+
+        All relational changes happen in one transaction.  The returned storage
+        keys deliberately contain no user-facing metadata and are used by the
+        API layer only after commit to remove private upload objects.
+        """
+        if not current_password:
+            raise AuthenticationError("Enter your current password to delete your account.")
+        connection = self._connection_factory(); cursor = connection.cursor(dictionary=True)
+        try:
+            cursor.execute("SELECT password_hash FROM users WHERE id = %s AND account_status = 'active' FOR UPDATE", (user_id,))
+            account = cursor.fetchone()
+            if not account:
+                raise AuthenticationError("Account is unavailable.")
+            try:
+                verified = PASSWORD_HASHER.verify(account["password_hash"], current_password)
+            except (VerifyMismatchError, InvalidHashError):
+                verified = False
+            if not verified:
+                raise AuthenticationError("Current password is incorrect.")
+            cursor.execute("SELECT 1 FROM owner_admin_assignment WHERE user_id = %s", (user_id,))
+            if cursor.fetchone():
+                raise AuthenticationError("Owner administrator accounts cannot be deleted here. Transfer ownership first.")
+            cursor.execute("SELECT storage_key FROM uploaded_files WHERE user_id = %s FOR UPDATE", (user_id,))
+            storage_keys = tuple(str(row["storage_key"]) for row in cursor.fetchall())
+            # Child rows are explicitly removed before users because the existing
+            # schema intentionally uses RESTRICT for most account relationships.
+            for table in ("account_action_tokens", "user_sessions", "uploaded_files", "upload_history", "sales_goals", "saved_reports", "user_preferences"):
+                cursor.execute(f"DELETE FROM {table} WHERE user_id = %s", (user_id,))
+            # Retain security-event timestamps while severing personal linkage.
+            cursor.execute("UPDATE audit_logs SET user_id = NULL WHERE user_id = %s", (user_id,))
+            cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
+            if not getattr(cursor, "rowcount", 1):
+                raise AuthenticationError("Account is unavailable.")
+            connection.commit()
+            return DeletedAccount(storage_keys=storage_keys)
+        except AuthenticationError:
+            connection.rollback(); raise
+        except Exception as error:
+            connection.rollback(); logger.exception("Account deletion failed")
+            raise AuthenticationError("Your account could not be deleted. No changes were saved.") from error
+        finally:
+            cursor.close(); connection.close()
+
+    def issue_account_action_token(self, email: str, purpose: str, *, min_interval_seconds: int = 60) -> AccountActionToken | None:
+        """Create a hashed, expiring, single-use action token without exposing account existence."""
+        if purpose not in {"password_reset", "email_verification"}:
+            raise ValueError("Unsupported account action.")
+        connection = self._connection_factory(); cursor = connection.cursor(dictionary=True)
+        try:
+            cursor.execute("SELECT id, email, full_name, phone, account_status, session_version, created_at, last_login_at FROM users WHERE email = %s AND account_status = 'active'", (normalise_email(email),))
+            row = cursor.fetchone()
+            if not row:
+                connection.commit(); return None
+            cursor.execute("SELECT created_at FROM account_action_tokens WHERE user_id = %s AND purpose = %s ORDER BY id DESC LIMIT 1", (row["id"], purpose))
+            recent = cursor.fetchone()
+            if recent and isinstance(recent.get("created_at"), datetime):
+                now = datetime.now(timezone.utc).replace(tzinfo=None)
+                if (now - recent["created_at"].replace(tzinfo=None)).total_seconds() < min_interval_seconds:
+                    connection.commit(); return None
+            cursor.execute("UPDATE account_action_tokens SET used_at = CURRENT_TIMESTAMP WHERE user_id = %s AND purpose = %s AND used_at IS NULL", (row["id"], purpose))
+            raw = secrets.token_urlsafe(32)
+            token_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+            cursor.execute("INSERT INTO account_action_tokens (user_id, token_hash, purpose, expires_at) VALUES (%s, %s, %s, DATE_ADD(CURRENT_TIMESTAMP, INTERVAL 24 HOUR))", (row["id"], token_hash, purpose))
+            self._audit(cursor, row["id"], "password_reset_requested" if purpose == "password_reset" else "email_verification_requested")
+            connection.commit()
+            return AccountActionToken(raw=raw, user=self._profile(row))
+        except Exception as error:
+            connection.rollback(); logger.exception("Account action token issue failed")
+            raise AuthenticationError("Account recovery is temporarily unavailable.") from error
+        finally:
+            cursor.close(); connection.close()
+
+    def reset_password_with_token(self, token: str, new_password: str) -> None:
+        _validate_registration("valid", "placeholder@example.com", new_password)
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        connection = self._connection_factory(); cursor = connection.cursor(dictionary=True)
+        try:
+            cursor.execute("SELECT t.id, t.user_id FROM account_action_tokens t INNER JOIN users u ON u.id = t.user_id WHERE t.token_hash = %s AND t.purpose = 'password_reset' AND t.used_at IS NULL AND t.expires_at > CURRENT_TIMESTAMP AND u.account_status = 'active' FOR UPDATE", (token_hash,))
+            row = cursor.fetchone()
+            if not row: raise AuthenticationError("This password reset link is invalid or has expired.")
+            cursor.execute("UPDATE users SET password_hash = %s, session_version = session_version + 1 WHERE id = %s", (PASSWORD_HASHER.hash(new_password), row["user_id"]))
+            cursor.execute("UPDATE account_action_tokens SET used_at = CURRENT_TIMESTAMP WHERE id = %s AND used_at IS NULL", (row["id"],))
+            self._audit(cursor, row["user_id"], "password_reset_completed")
+            connection.commit()
+        except AuthenticationError:
+            connection.rollback(); raise
+        except Exception as error:
+            connection.rollback(); logger.exception("Password reset failed")
+            raise AuthenticationError("We could not reset the password. Please try again.") from error
+        finally:
+            cursor.close(); connection.close()
+
+    def verify_email_token(self, token: str) -> None:
+        token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        connection = self._connection_factory(); cursor = connection.cursor(dictionary=True)
+        try:
+            cursor.execute("SELECT id, user_id FROM account_action_tokens WHERE token_hash = %s AND purpose = 'email_verification' AND used_at IS NULL AND expires_at > CURRENT_TIMESTAMP FOR UPDATE", (token_hash,))
+            row = cursor.fetchone()
+            if not row: raise AuthenticationError("This verification link is invalid or has expired.")
+            cursor.execute("UPDATE account_action_tokens SET used_at = CURRENT_TIMESTAMP WHERE id = %s AND used_at IS NULL", (row["id"],))
+            cursor.execute("UPDATE users SET email_verified_at = COALESCE(email_verified_at, CURRENT_TIMESTAMP) WHERE id = %s", (row["user_id"],))
+            self._audit(cursor, row["user_id"], "email_verified")
+            connection.commit()
+        except AuthenticationError:
+            connection.rollback(); raise
+        except Exception as error:
+            connection.rollback(); logger.exception("Email verification failed")
+            raise AuthenticationError("We could not verify this email. Please try again.") from error
         finally:
             cursor.close(); connection.close()
 

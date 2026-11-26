@@ -2208,7 +2208,7 @@ button[aria-label="Next.js Devtools"],
   justify-content: space-between;
   gap: 12px;
   margin-top: 23px;
-  color: #c7d5e8;
+  color: #c8e6c9;
   font-size: 12px;
 }
 
@@ -2345,6 +2345,24 @@ button[aria-label="Next.js Devtools"],
   background: #f5f9f4;
   font-size: 12px;
 }
+
+.password-input-wrap { position: relative; display: block; }
+.password-input-wrap [data-slot="input"] { width: 100%; padding-right: 42px; }
+.password-visibility { position: absolute; top: 50%; right: 6px; display: inline-flex; width: 30px; height: 30px; align-items: center; justify-content: center; border: 0; border-radius: 6px; background: transparent; color: #52685c; cursor: pointer; transform: translateY(-50%); }
+.password-visibility:hover { background: #e8f3ed; color: #1e5233; }
+.password-visibility:focus-visible, .forgot-password-link:focus-visible { outline: 2px solid #1e5233; outline-offset: 2px; }
+.password-visibility svg { width: 16px; height: 16px; }
+.forgot-password-link { align-self: flex-end; border: 0; background: transparent; padding: 0; color: #1e5233; font-size: 12px; font-weight: 650; cursor: pointer; }
+.login-assistance { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.login-assistance .forgot-password-link { align-self: auto; }
+.forgot-password-link:hover { color: #2d7a52; text-decoration: underline; }
+.login-return { align-self: auto; margin-top: 14px; }
+.login-notice { margin: 0; border: 1px solid #c8e6c9; border-radius: 7px; background: #f5f9f4; padding: 9px 10px; color: #1e5233; font-size: 11px; line-height: 1.5; }
+
+.analytics-date-primary { border-color: #1e5233 !important; background: #1e5233 !important; color: #fff !important; }
+.analytics-date-primary:hover:not(:disabled) { background: #2d7a52 !important; }
+.analytics-date-secondary { border-color: #a9d0b8 !important; background: #fff !important; color: #1e5233 !important; }
+.analytics-date-secondary:hover:not(:disabled) { border-color: #2d7a52 !important; background: #eef7f1 !important; }
 
 .login-submit {
   width: 100%;

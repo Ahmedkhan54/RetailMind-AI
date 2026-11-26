@@ -756,12 +756,12 @@ function AnalyticsPage({ item }: { item: NavigationItem }) {
             <div className="analytics-chart">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart key={isAnimationActive ? "animated" : "static"} data={chartRows} layout="vertical" margin={{ top: 4, right: 16, left: 4, bottom: 4 }}>
-                  <CartesianGrid stroke="#edf0f5" strokeDasharray="3 4" horizontal={false} />
-                  <XAxis type="number" tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} tickFormatter={(value: number) => new Intl.NumberFormat("en-IN", { notation: "compact", maximumFractionDigits: 1 }).format(value)} />
-                  <YAxis type="category" dataKey="label" width={116} tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} />
+                  <CartesianGrid stroke="#e8f0ea" strokeDasharray="3 4" horizontal={false} />
+                  <XAxis type="number" tickLine={false} axisLine={false} tick={{ fill: "#6b7d72", fontSize: 11 }} tickFormatter={(value: number) => new Intl.NumberFormat("en-IN", { notation: "compact", maximumFractionDigits: 1 }).format(value)} />
+                  <YAxis type="category" dataKey="label" width={116} tickLine={false} axisLine={false} tick={{ fill: "#6b7d72", fontSize: 11 }} />
                   <Tooltip formatter={(value) => ["sales", "revenue", "profit"].includes(String(chartField)) ? formatCurrency(Number(value)) : formatNumber(Number(value))} />
                   <Bar dataKey="value" name={String(chartField).replaceAll("_", " ")} radius={[0, 6, 6, 0]} barSize={14} isAnimationActive={isAnimationActive} animationDuration={animationDuration} animationEasing={animationEasing}>
-                    {chartRows.map((row, index) => <Cell key={`${row.label}-${index}`} fill={index % 2 === 0 ? "#3e75bd" : "#a6c4f1"} />)}
+                    {chartRows.map((row, index) => <Cell key={`${row.label}-${index}`} fill={index % 2 === 0 ? "#1e5233" : "#a5d6a7"} />)}
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
@@ -907,12 +907,12 @@ function StockRecommendationsPage({ item }: { item: NavigationItem }) {
                 <div className="analytics-chart">
                   <ResponsiveContainer width="100%" height="100%">
                     <BarChart key={isAnimationActive ? "animated" : "static"} data={chartRows} layout="vertical" margin={{ top: 4, right: 16, left: 4, bottom: 4 }}>
-                      <CartesianGrid stroke="#edf0f5" strokeDasharray="3 4" horizontal={false} />
-                      <XAxis type="number" tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} tickFormatter={(value: number) => new Intl.NumberFormat("en-IN", { notation: "compact", maximumFractionDigits: 1 }).format(value)} />
-                      <YAxis type="category" dataKey="label" width={126} tickLine={false} axisLine={false} tick={{ fill: "#8993a2", fontSize: 11 }} />
+                      <CartesianGrid stroke="#e8f0ea" strokeDasharray="3 4" horizontal={false} />
+                      <XAxis type="number" tickLine={false} axisLine={false} tick={{ fill: "#6b7d72", fontSize: 11 }} tickFormatter={(value: number) => new Intl.NumberFormat("en-IN", { notation: "compact", maximumFractionDigits: 1 }).format(value)} />
+                      <YAxis type="category" dataKey="label" width={126} tickLine={false} axisLine={false} tick={{ fill: "#6b7d72", fontSize: 11 }} />
                       <Tooltip formatter={(value) => [formatNumber(Number(value), 2), chartMetric === "suggested_reorder_quantity" ? "Suggested reorder" : "Reorder point"]} />
                       <Bar dataKey="value" name="Units" radius={[0, 6, 6, 0]} barSize={14} isAnimationActive={isAnimationActive} animationDuration={animationDuration} animationEasing={animationEasing}>
-                        {chartRows.map((row, index) => <Cell key={`${row.label}-${index}`} fill={index % 2 === 0 ? "#3e75bd" : "#a6c4f1"} />)}
+                        {chartRows.map((row, index) => <Cell key={`${row.label}-${index}`} fill={index % 2 === 0 ? "#1e5233" : "#a5d6a7"} />)}
                       </Bar>
                     </BarChart>
                   </ResponsiveContainer>
@@ -1943,6 +1943,9 @@ function AccountSecurityPage({ item }: { item: NavigationItem }) {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
   const [messageError, setMessageError] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteConfirmation, setDeleteConfirmation] = useState("");
+  const [deleting, setDeleting] = useState(false);
 
   async function changePassword(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1961,7 +1964,22 @@ function AccountSecurityPage({ item }: { item: NavigationItem }) {
     } finally { setSaving(false); }
   }
 
-  return <div className="page-stack"><PageHeading item={item} /><div className="settings-grid"><Card className="panel-card"><CardHeader><CardTitle className="panel-title">Change password</CardTitle><p className="panel-subtitle">Use a new password with at least 12 characters. Other sessions will be invalidated.</p></CardHeader><CardContent><form className="profile-form" onSubmit={changePassword}><label>Current password<Input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required /></label><label>New password<Input type="password" autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} minLength={12} required /></label><label>Confirm new password<Input type="password" autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} minLength={12} required /></label><Button type="submit" disabled={saving}>{saving ? "Updating…" : "Update password"}</Button></form>{message ? <p className={cn("upload-message", messageError && "upload-message-error")} role={messageError ? "alert" : "status"}>{message}</p> : null}</CardContent></Card><Card className="panel-card"><CardHeader><CardTitle className="panel-title">Session security</CardTitle><p className="panel-subtitle">Sessions are stored as hashed secrets and revalidated against account status.</p></CardHeader><CardContent><div className="feature-list"><p><LockKeyhole aria-hidden="true" /> Signed in as {session?.user.email ?? "account unavailable"}</p><p><ShieldCheck aria-hidden="true" /> Passwords are processed by the existing Argon2id service.</p><p><Users aria-hidden="true" /> Owner administrators can revoke other active sessions from the owner console.</p></div>{session?.role === "owner_admin" ? <Link href="/owner-admin" className="text-action">Open owner console <ArrowRight aria-hidden="true" /></Link> : null}</CardContent></Card></div></div>;
+  async function deleteAccount(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (deleting || deleteConfirmation !== "DELETE MY ACCOUNT") return;
+    setDeleting(true); setMessage("");
+    try {
+      const response = await fetch("/api/retailmind/auth/account", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ current_password: deletePassword, confirmation: deleteConfirmation }) });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "Your account could not be deleted.");
+      await mutate("/api/retailmind/auth/session", null, { revalidate: false });
+      router.replace("/login"); router.refresh();
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : "Your account could not be deleted."); setMessageError(true);
+    } finally { setDeleting(false); }
+  }
+
+  return <div className="page-stack"><PageHeading item={item} /><div className="settings-grid"><Card className="panel-card"><CardHeader><CardTitle className="panel-title">Change password</CardTitle><p className="panel-subtitle">Use a new password with at least 12 characters. Other sessions will be invalidated.</p></CardHeader><CardContent><form className="profile-form" onSubmit={changePassword}><label>Current password<Input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required /></label><label>New password<Input type="password" autoComplete="new-password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} minLength={12} required /></label><label>Confirm new password<Input type="password" autoComplete="new-password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} minLength={12} required /></label><Button type="submit" disabled={saving}>{saving ? "Updating…" : "Update password"}</Button></form>{message ? <p className={cn("upload-message", messageError && "upload-message-error")} role={messageError ? "alert" : "status"}>{message}</p> : null}</CardContent></Card><Card className="panel-card"><CardHeader><CardTitle className="panel-title">Session security</CardTitle><p className="panel-subtitle">Sessions are stored as hashed secrets and revalidated against account status.</p></CardHeader><CardContent><div className="feature-list"><p><LockKeyhole aria-hidden="true" /> Signed in as {session?.user.email ?? "account unavailable"}</p><p><ShieldCheck aria-hidden="true" /> Passwords are processed by the existing Argon2id service.</p><p><Users aria-hidden="true" /> Owner administrators can revoke other active sessions from the owner console.</p></div>{session?.role === "owner_admin" ? <Link href="/owner-admin" className="text-action">Open owner console <ArrowRight aria-hidden="true" /></Link> : null}</CardContent></Card></div><Card className="panel-card"><CardHeader><CardTitle className="panel-title">Delete account</CardTitle><p className="panel-subtitle">This permanently deletes your account, sessions, saved reports, goals, preferences, and uploaded-file metadata. Security audit timestamps are retained without a link to you.</p></CardHeader><CardContent><form className="profile-form" onSubmit={deleteAccount}><label>Current password<Input type="password" autoComplete="current-password" value={deletePassword} onChange={(event) => setDeletePassword(event.target.value)} required /></label><label>Type DELETE MY ACCOUNT to confirm<Input value={deleteConfirmation} onChange={(event) => setDeleteConfirmation(event.target.value)} autoComplete="off" required /></label><Button type="submit" variant="destructive" disabled={deleting || deleteConfirmation !== "DELETE MY ACCOUNT"}>{deleting ? "Deleting…" : "Permanently delete account"}</Button></form>{message ? <p className={cn("upload-message", messageError && "upload-message-error")} role={messageError ? "alert" : "status"}>{message}</p> : null}</CardContent></Card></div>;
 }
 
 function PreferencesPage({ item }: { item: NavigationItem }) {

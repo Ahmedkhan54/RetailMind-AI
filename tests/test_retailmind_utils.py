@@ -40,3 +40,25 @@ def test_to_numeric_loose_leaves_plain_numeric_values_untouched() -> None:
     assert parsed.iloc[0] == 10
     assert parsed.iloc[1] == 20.5
     assert pd.isna(parsed.iloc[2])
+
+
+def test_to_numeric_loose_keeps_prefixed_identifiers_as_text() -> None:
+    """SKU/customer/order codes must not be mistaken for numbers.
+
+    A generic "drop the first letters" rule turned ``P0`` and ``C001`` into
+    ``0`` and ``1``; those columns were then classified as measures and wiped
+    during numeric coercion, which emptied dashboard filters.
+    """
+    values = pd.Series(["P0", "P1", "C001", "O0001", "SKU-9", "A12B"])
+
+    parsed = to_numeric_loose(values)
+
+    assert parsed.isna().all()
+
+
+def test_to_numeric_loose_still_strips_recognised_currency_codes() -> None:
+    values = pd.Series(["USD100", "usd 250", "GBP. 75", "INR 4500", "100 EUR"])
+
+    parsed = to_numeric_loose(values)
+
+    assert parsed.tolist() == [100.0, 250.0, 75.0, 4500.0, 100.0]

@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import replace
 from datetime import date, datetime
 from io import BytesIO
+import logging
 from uuid import uuid4
 
 from fastapi import HTTPException, Response
@@ -571,3 +572,45 @@ def test_session_cookie_stays_usable_on_plain_http(monkeypatch, stub_auth):
     cookie = response.headers["set-cookie"]
     assert "Secure" not in cookie
     assert "HttpOnly" in cookie and "SameSite=lax" in cookie
+
+
+def test_registration_succeeds_when_the_verification_email_cannot_be_issued(monkeypatch, caplog):
+    """A token-store/SMTP failure must not 500 after the user row exists.
+
+    The account and session are created before the welcome email is attempted.
+    Returning 500 there left the client without a cookie, and retrying failed as
+    a duplicate registration, so the new account was unusable.
+    """
+
+    class RegistrationStub:
+        def register(self, full_name: str, email: str, phone: str | None, password: str) -> UserProfile:
+            assert email == "new.user@example.test"
+            return replace(USER, email=email)
+
+        def create_user_session(self, user_id: int, lifetime_seconds: int) -> UserSession:
+            return UserSession(str(uuid4()), "opaque-test-session-secret", datetime(2025, 1, 1))
+
+        def issue_account_action_token(self, *args, **kwargs):
+            raise AuthenticationError("Account recovery is temporarily unavailable.")
+
+        def get_current_role(self, user_id: int) -> str:
+            return "user"
+
+    monkeypatch.setattr(auth_api, "auth_service", lambda: RegistrationStub())
+    response = Response()
+
+    with caplog.at_level(logging.WARNING, logger="src.auth.api"):
+        payload = auth_api.register(
+            auth_api.RegistrationRequest(
+                full_name="New User",
+                email="new.user@example.test",
+                phone=None,
+                password="a sufficiently long test password",
+            ),
+            response,
+        )
+
+    assert payload["user"]["email"] == "new.user@example.test"
+    assert payload["email_confirmation_sent"] is False
+    assert "set-cookie" in response.headers
+    assert any("verification email" in record.getMessage().lower() for record in caplog.records)

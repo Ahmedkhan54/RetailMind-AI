@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 
 import pandas as pd
@@ -115,6 +116,47 @@ class CleaningTests(unittest.TestCase):
         summary = cleaning_summary(report)
         self.assertFalse(summary.empty)
         self.assertTrue(all(isinstance(value, str) for value in summary["Value"]))
+
+
+def coded_frame() -> pd.DataFrame:
+    """Retail frame whose identifiers contain digits (P0, C001, O0001)."""
+    return pd.DataFrame(
+        {
+            "Order_ID": [f"O{index:04d}" for index in range(6)],
+            "Order_Date": pd.date_range("2024-01-01", periods=6, freq="D").astype(str),
+            "Customer_ID": [f"C{index % 3:03d}" for index in range(6)],
+            "Product": ["P0", "P1", "P2", "P0", "P1", "P2"],
+            "Category": ["Office", "Tech", "Home", "Office", "Tech", "Home"],
+            "Sales": [100, 200, 300, 400, 500, 600],
+        }
+    )
+
+
+class CodedIdentifierTests(unittest.TestCase):
+    def test_prefixed_codes_are_not_classified_as_numeric(self):
+        schema = infer_schema(coded_frame())
+        self.assertNotIn("Product", schema.numeric)
+        self.assertNotIn("Customer_ID", schema.numeric)
+        self.assertIn("Product", schema.dimensions)
+
+    def test_cleaning_preserves_prefixed_codes(self):
+        frame = coded_frame()
+        schema = infer_schema(frame)
+        cleaned, _report = apply_cleaning(frame, schema, DEFAULT_OPTIONS)
+
+        self.assertEqual(cleaned["Product"].tolist(), frame["Product"].tolist())
+        self.assertEqual(cleaned["Customer_ID"].tolist(), frame["Customer_ID"].tolist())
+        self.assertEqual(cleaned["Order_ID"].tolist(), frame["Order_ID"].tolist())
+
+    def test_coercion_never_touches_dimensions_even_if_schema_lists_them_as_numeric(self):
+        frame = coded_frame()
+        schema = infer_schema(frame)
+        # Simulate a misclassified schema to exercise the defensive guard.
+        misclassified = replace(schema, numeric=[*schema.numeric, "Product"])
+        cleaned, _report = apply_cleaning(frame, misclassified, DEFAULT_OPTIONS)
+
+        self.assertTrue(cleaned["Product"].notna().all())
+        self.assertEqual(set(cleaned["Product"]), {"P0", "P1", "P2"})
 
 
 if __name__ == "__main__":

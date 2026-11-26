@@ -839,7 +839,7 @@ def render_intelligence_hub(frame: pd.DataFrame, schema: DatasetSchema, identity
                         alt.Tooltip("avg_monetary_value:Q", title="Avg Monetary", format=",.2f"),
                     ],
                 ).properties(height=260)
-                st.altair_chart(chart, use_container_width=True)
+                st.altair_chart(chart, width="stretch")
 
                 with st.expander("Customer RFM details preview", expanded=False):
                     st.dataframe(seg_result.rfm.head(MAX_PREVIEW_ROWS), width="stretch", hide_index=True)
@@ -995,7 +995,7 @@ def render_intelligence_hub(frame: pd.DataFrame, schema: DatasetSchema, identity
                     y="lower_bound:Q",
                     y2="upper_bound:Q"
                 )
-                st.altair_chart(band_chart + line_chart, use_container_width=True)
+                st.altair_chart(band_chart + line_chart, width="stretch")
 
                 with st.expander("Forecast numbers table", expanded=False):
                     st.dataframe(fc_result.forecast, width="stretch", hide_index=True)

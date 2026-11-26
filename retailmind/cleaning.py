@@ -92,6 +92,19 @@ def _invalid_numeric(series: pd.Series) -> int:
     return int((present & numeric.isna()).sum())
 
 
+def _coercible_numeric_columns(schema: DatasetSchema) -> list[str]:
+    """Numeric columns that are safe to coerce.
+
+    Text columns can be misclassified as numeric when their values merely look
+    numeric (for example SKU codes such as ``P0`` or ``C001``).  Coercing those
+    columns replaces the only copy of a dimension with ``NaN``, leaving filter
+    widgets with no options and the dashboard empty.  Dimensions, categorical
+    columns and identifiers are therefore never coerced.
+    """
+    protected = set(schema.dimensions) | set(schema.categorical) | set(schema.identifiers)
+    return [column for column in schema.numeric if column not in protected]
+
+
 def _whitespace_count(series: pd.Series) -> int:
     if not (pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(series)):
         return 0
@@ -152,7 +165,7 @@ def analyse_cleaning(frame: pd.DataFrame, schema: DatasetSchema) -> list[Cleanin
                 )
             )
 
-    for column in schema.numeric:
+    for column in _coercible_numeric_columns(schema):
         if column not in frame.columns:
             continue
         invalid = _invalid_numeric(frame[column])
@@ -290,7 +303,7 @@ def apply_cleaning(
 
     if chosen.get("coerce_numerics", True):
         coerced = 0
-        for column in schema.numeric:
+        for column in _coercible_numeric_columns(schema):
             if column not in cleaned.columns:
                 continue
             before = pd.to_numeric(cleaned[column], errors="coerce")

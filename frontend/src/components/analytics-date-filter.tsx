@@ -58,10 +58,10 @@ export function AnalyticsDateFilter({
           onChange={(event) => onDateToChange(event.target.value)}
         />
       </label>
-      <Button type="button" variant="outline" size="sm" disabled={disabled} onClick={setLast30Days}>
+      <Button type="button" className="analytics-date-primary" size="sm" disabled={disabled} onClick={setLast30Days}>
         Last 30 days
       </Button>
-      <Button type="button" variant="ghost" size="sm" disabled={disabled || (!dateFrom && !dateTo)} onClick={onClear}>
+      <Button type="button" className="analytics-date-secondary" variant="outline" size="sm" disabled={disabled || (!dateFrom && !dateTo)} onClick={onClear}>
         Clear dates
       </Button>
       {invalidRange ? <p className="analytics-date-error" role="alert">The start date must be on or before the end date.</p> : null}

@@ -213,7 +213,7 @@ export function IndiaMapChart({ regions, mode, selectedRegion, search, onSelectR
             const matches = !query || feature.key.includes(query);
             const hasValue = Boolean(feature.value);
             const fill = !hasValue
-              ? "#eef2f7"
+              ? "#edf5ef"
               : mode === "heatmap"
                 ? `rgba(193, 84, 32, ${(0.22 + ratio * 0.74).toFixed(3)})`
                 : `rgba(30, 82, 51, ${(0.24 + ratio * 0.72).toFixed(3)})`;
@@ -222,7 +222,7 @@ export function IndiaMapChart({ regions, mode, selectedRegion, search, onSelectR
                 key={feature.key}
                 d={feature.path}
                 fill={fill}
-                stroke={isSelected ? "#b8860b" : hovered === feature.key ? "#173b73" : hasValue ? "#ffffff" : "#c7d2df"}
+                stroke={isSelected ? "#b8860b" : hovered === feature.key ? "#1e5233" : hasValue ? "#ffffff" : "#d4e2d8"}
                 strokeWidth={isSelected ? 1.2 : hovered === feature.key ? 0.9 : hasValue ? 0.4 : 0.3}
                 opacity={matches ? 1 : 0.28}
                 onClick={() => onSelectRegion(isSelected ? "" : feature.name)}

@@ -5,6 +5,7 @@ import {
   Boxes,
   BriefcaseBusiness,
   Building2,
+  CheckSquare,
   CircleDollarSign,
   Clock3,
   Database,
@@ -12,6 +13,7 @@ import {
   FileSpreadsheet,
   FileText,
   Gauge,
+  HelpCircle,
   Layers,
   Lightbulb,
   MapPinned,
@@ -47,6 +49,7 @@ export const navigationGroups: NavigationGroup[] = [
     label: "Workspace",
     items: [
       { label: "Overview Dashboard", href: "/overview", icon: PanelTop, description: "A clear view of your business performance." },
+      { label: "Tasks & Workflows", href: "/tasks", icon: CheckSquare, description: "Kanban task tracking and team delivery pipeline." },
       { label: "My Datasets", href: "/datasets", icon: Database, description: "Review datasets available in this workspace." },
       { label: "Data Upload", href: "/upload", icon: Upload, description: "Bring a CSV or Excel workbook into RetailMind." },
       { label: "Recent Activity", href: "/activity", icon: Clock3, description: "See recent work across your analytics workspace." },
@@ -103,6 +106,7 @@ export const navigationGroups: NavigationGroup[] = [
   {
     label: "Settings",
     items: [
+      { label: "Help Center", href: "/help", icon: HelpCircle, description: "FAQs, keyboard shortcuts, and support guides." },
       { label: "User Profile", href: "/profile", icon: UserRound, description: "Review your profile and workspace identity." },
       { label: "Account Settings", href: "/account-settings", icon: Settings2, description: "Manage account-level preferences." },
       { label: "Data Connections", href: "/data-connections", icon: Database, description: "Connect the separate Python analytics service." },
