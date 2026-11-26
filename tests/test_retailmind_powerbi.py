@@ -543,3 +543,22 @@ def test_validate_pbip_rejects_missing_data_source(sample_retail_df: pd.DataFram
     files = {path: content for path, content in files.items() if "/definition/dataSources/" not in path}
     errors = validate_pbip(files)
     assert any("data source" in error.lower() for error in errors), errors
+
+
+def test_relationships_use_tmdl_dot_syntax_and_standard_guids(sample_retail_df: pd.DataFrame):
+    """Regression test: relationships must use Table.Column syntax (never Table[Column]) and standard GUIDs."""
+    project = build_pbip(sample_retail_df, infer_schema(sample_retail_df), project_name="Rel Test")
+    rel_file = [c for p, c in project.files.items() if p.endswith("relationships.tmdl")]
+    assert len(rel_file) == 1, "relationships.tmdl must exist"
+    content = rel_file[0]
+    lines = content.splitlines()
+    for line in lines:
+        if line.strip().startswith("relationship "):
+            guid = line.strip().split()[1]
+            assert len(guid) == 36, f"Relationship ID should be a standard 36-char GUID, got {guid}"
+            assert guid.count("-") == 4, f"GUID format should have 4 dashes: {guid}"
+        if line.strip().startswith("fromColumn:") or line.strip().startswith("toColumn:"):
+            val = line.split(":", 1)[1].strip()
+            assert "[" not in val and "]" not in val, f"Column reference must use Table.Column, not DAX brackets: {val}"
+            assert "." in val, f"Column reference must contain a dot separator: {val}"
+
